@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "entrypoint": "game/engine.dart",
+  "files": [
+    {
+      "path": "content/runtime_catalog.dart",
+      "sha256": "1d7ef2c69bee97b1a022df3a8da76964c7d6b7a1001fbfc8955d998c6fd1a44e"
+    },
+    {
+      "path": "game/arena_ids.dart",
+      "sha256": "b9bc4f810785a1b3e29dc7ae2f0f722aaaed9aa1b99aad30a0bc921d1e355f8e"
+    },
+    {
+      "path": "game/arena_map.dart",
+      "sha256": "dc6d36ea58822f76bd6feebdeee05c90731a96f7ac15360d561dc9efec0e7c98"
+    },
+    {
+      "path": "game/campaign_mastery.dart",
+      "sha256": "38d32aeb55f91053dbd60a0bf9fe8e68f0f89b4f38518436fd9d9ac815c81eaf"
+    },
+    {
+      "path": "game/campaign.dart",
+      "sha256": "cf5df572e8e741a08c65832fdb1a5ec45726dbc634b87ba0a1e80b0e706f63f4"
+    },
+    {
+      "path": "game/champion_abilities_engine.dart",
+      "sha256": "1563c9cab5eea4e35ee31ce975bbbf19cccb636e279b61e0a18b39f1bdd02e9a"
+    },
+    {
+      "path": "game/champion_abilities.dart",
+      "sha256": "93402badeeac1742c0ab86901bb031b7f803bdc0157b1f50933b32172f047fb2"
+    },
+    {
+      "path": "game/champion_health.dart",
+      "sha256": "7fe81c95a52859ef71768bd3b642f627147df5ce01b0cb1baa64a22f36ecdea7"
+    },
+    {
+      "path": "game/champion_progress.dart",
+      "sha256": "07f7aa1c95445a7e7a91823e1367bd997713efd82de72bd0d8dbf4ab4164c477"
+    },
+    {
+      "path": "game/chapter_finales.dart",
+      "sha256": "901c747755abb4cc0441259811fe1280a1a7169b398c9d838dad2ca9e6c1516f"
+    },
+    {
+      "path": "game/combat_feedback.dart",
+      "sha256": "a8e63bae1e504c4b77eb35b1643dff9362932f9973d13afbc278d43d518e6de7"
+    },
+    {
+      "path": "game/combat_loot.dart",
+      "sha256": "121cf421153b532a2bc721cb6b30d43cd380b17e74683eddccebf3cb17522374"
+    },
+    {
+      "path": "game/combat.dart",
+      "sha256": "f6d739a558537e8124109a4ef8166bfa100e684b66aa8884b76b23a23707a23e"
+    },
+    {
+      "path": "game/cooperative_engine.dart",
+      "sha256": "966bb4392f56b80e50711cf205c76e8f1a939b1172d834a0ac2e0c8e0dec358a"
+    },
+    {
+      "path": "game/distractions.dart",
+      "sha256": "06cae5da3e690f7451c09b177cae5bb4db36c39a84783b311711f98ea8a90e33"
+    },
+    {
+      "path": "game/endless_balance.dart",
+      "sha256": "a54d9620050f40c30c6fe06e115691d6f2a7acc21c7b5ba630427099f1fd4377"
+    },
+    {
+      "path": "game/engine.dart",
+      "sha256": "cd85263dcb3df177328a801c724f699bced5ee5f39bca0e09f9d298024f89c4b"
+    },
+    {
+      "path": "game/game_int.dart",
+      "sha256": "b7a0d279091ec854a548622ad46dd44f979a8d181f8598473a5870c6c0547c0a"
+    },
+    {
+      "path": "game/hazards.dart",
+      "sha256": "c3ad7a87410bc4550de87352ef085189455ce91c8878fdcd410c6f59ecf5a3aa"
+    },
+    {
+      "path": "game/heroes.dart",
+      "sha256": "b175adfccfd65f1b783196a1affe1f846266e5838b0239cf2eda34717e907908"
+    },
+    {
+      "path": "game/manor_layout.dart",
+      "sha256": "a91a2925df1f70b4d5591ae4b97aff7d45904382d57e48f455c486a82dfff42c"
+    },
+    {
+      "path": "game/moments.dart",
+      "sha256": "e28720fea4bf42e4a893a6e22a8baf3093d6f84ca791213eabcd8b8eba2809b4"
+    },
+    {
+      "path": "game/monster_damage_trail.dart",
+      "sha256": "37cca2418baaf3403ca5e158bf033b9befbfde58e96c84ab9cde330d41d42ce5"
+    },
+    {
+      "path": "game/monster_evolution.dart",
+      "sha256": "5bf06bd6901bfd8a17d8bc0d426520267e9445191976fd12c6fbebd1c88c0ee1"
+    },
+    {
+      "path": "game/monster_remains.dart",
+      "sha256": "feb182f2e80e0028654d1ec4b02fadc300d4be28163c2c5ffa43c5afdd661a33"
+    },
+    {
+      "path": "game/monster_skills_engine.dart",
+      "sha256": "19dcff58aacb4f863db92610c3f296844045b84abc9f9e6fb0014dc9aa67b0ba"
+    },
+    {
+      "path": "game/navigation.dart",
+      "sha256": "95a3f2aafd4708a530bd89e52d2b2e9ab8f01135105e2fb6a43647d98a745f1a"
+    },
+    {
+      "path": "game/nyx_eclipse_motion.dart",
+      "sha256": "0740c79ca0c758432bb5d837694abdb9d134ce275328805504ed836a57d45032"
+    },
+    {
+      "path": "game/scoring.dart",
+      "sha256": "7d279ab95e99efbf1706c3bfe3d62871cff85f20a0f3ff5311dfbace5affdaf3"
+    },
+    {
+      "path": "game/skill_targeting.dart",
+      "sha256": "f8d58227a17e64fd549dcfd0cec29a0106c7e2177b6e6adac54adb2aaa4f68b6"
+    },
+    {
+      "path": "game/solo_tools.dart",
+      "sha256": "7446fca1c6c4a8b405776c274d30224116da2d5cd6ce69a3ed2c8a05525b8bb8"
+    },
+    {
+      "path": "game/survival.dart",
+      "sha256": "41b26acee56a6a4b431c96639ec70864caa84a103ab6d8a2538f0b1f69c9981c"
+    },
+    {
+      "path": "game/tech_layout.dart",
+      "sha256": "8a460b03ffa4a94753bde68a8713e3096a79716976a30815f6d6f33bad9a6944"
+    },
+    {
+      "path": "game/tech_monster_skills_engine.dart",
+      "sha256": "415052558eab157eb0aa0f0fdbabc24dc3a631c22ae6495dc3ab0880f47be179"
+    },
+    {
+      "path": "game/timed_cover.dart",
+      "sha256": "d17f95146273c00c4d297704c049a546089c19d935dfc03d2d6156e92b129df2"
+    },
+    {
+      "path": "game/treasure_chest.dart",
+      "sha256": "164154b13b973d19debbb3c50e392e8c21ec16e72963401ef6b8a24268b74780"
+    },
+    {
+      "path": "game/volcano_layout.dart",
+      "sha256": "7609efb8137293b8743e652061b83e515813a901568245fd337a09a8e1758d7f"
+    },
+    {
+      "path": "game/weapon_progress.dart",
+      "sha256": "9350914dafe667721f5c1c64e2b5d1d09443652c534b3334cc31534b234b7188"
+    }
+  ]
+}

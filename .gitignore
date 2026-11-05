@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+**/.env
+**/.env.*
+**/.dart_tool/
+.DS_Store
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secrets*
+build/
+.cache/
+coverage/

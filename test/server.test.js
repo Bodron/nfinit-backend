@@ -1,0 +1,96 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { WebSocket } from 'ws';
+import { MemoryStore } from '../src/store.js';
+import { startBackend } from '../src/server.js';
+import { configFrom } from '../src/config.js';
+
+const engineBin = fileURLToPath(new URL('../build/nfinit-engine', import.meta.url));
+const config = { host: '127.0.0.1', port: 0, origins: new Set(), maxRooms: 5, reconnectMs: 1000, engineBin };
+async function until(fn, ms = 5000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (fn()) return fn(); await new Promise(r => setTimeout(r, 20)); }
+  throw new Error('Timed out waiting for server state');
+}
+async function client(port) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`), messages = [];
+  ws.on('message', raw => messages.push(JSON.parse(raw)));
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  return { ws, messages, send: m => ws.send(JSON.stringify(m)), state: () => messages.findLast(m => m.type === 'state'),
+    identity: () => messages.find(m => m.type === 'identity'), error: code => messages.find(m => m.type === 'error' && m.code === code) };
+}
+test('Configuration requires MongoDB and rejects invalid capacity/port without exposing credentials', () => {
+  assert.throws(() => configFrom({}), /MONGODB_URI/);
+  assert.throws(() => configFrom({ MONGODB_URI: 'mongodb://localhost', PORT: '-1' }), /PORT/);
+  assert.equal(configFrom({ MONGODB_URI: 'mongodb://localhost' }).maxRooms, 30);
+});
+test('Two real clients play co-op, reject a third, reconnect and persist one result', async t => {
+  const store = new MemoryStore(), app = await startBackend({ config, store });
+  t.after(() => app.close());
+  const a = await client(app.port); t.after(() => a.ws.terminate());
+  a.send({ type: 'join', name: 'Nyx', skin: 0 });
+  await until(() => a.state());
+  const code = a.state().code, identity = a.identity();
+  assert.equal(a.state().maxPlayers, 2); assert.equal(a.state().coop, true);
+  a.send({ type: 'start' }); await until(() => a.error('need_two_players'));
+  const b = await client(app.port); t.after(() => b.ws.terminate());
+  b.send({ type: 'join', code, name: 'Brum', skin: 2 });
+  await until(() => b.state()?.humanCount === 2 && a.state()?.humanCount === 2);
+  b.send({ type: 'start' }); await until(() => b.error('host_only'));
+  const c = await client(app.port); t.after(() => c.ws.terminate());
+  c.send({ type: 'join', code, name: 'Third', skin: 1 }); await until(() => c.error('room_unavailable'));
+  a.send({ type: 'start', wave: 9999, health: 1e30 });
+  await until(() => a.state()?.running && b.state()?.running);
+  assert.equal(a.state().wave, 1); assert.equal(a.state().hunter, false); assert.equal(b.state().hunter, false);
+  assert.equal(a.state().combat, true); assert.equal(a.state().party.length, 2);
+  const ax = a.state().self.x, by = b.state().self.y;
+  a.send({ type: 'move', dx: -1, dy: 0 }); b.send({ type: 'move', dx: 0, dy: 1 });
+  await until(() => a.state().self.x < ax - .003 && b.state().self.y > by + .003);
+  a.send({ type: 'action', action: 'skill:0' });
+  await until(() => a.state().minorSkillSerial > 0);
+  b.send({ type: 'setHealth', health: 1e30 }); await until(() => b.error('invalid_message'));
+  a.send({ type: 'move', dx: 0, dy: 0 }); b.send({ type: 'move', dx: 0, dy: 0 });
+  a.ws.terminate();
+  await until(() => b.state()?.paused && b.state()?.reconnecting);
+  const elapsed = b.state().elapsed;
+  await new Promise(r => setTimeout(r, 120)); assert.equal(b.state().elapsed, elapsed);
+  const resumed = await client(app.port); t.after(() => resumed.ws.terminate());
+  resumed.send({ type: 'join', code, token: identity.token, name: 'Forged name', skin: 3 });
+  await until(() => resumed.state()?.running && !resumed.state()?.paused);
+  assert.equal(resumed.state().id, identity.playerId); assert.equal(resumed.state().self.skin, 0);
+  assert.equal(resumed.state().matchId, b.state().matchId);
+  b.send({ type: 'leave' });
+  await until(() => resumed.messages.some(m => m.type === 'roomClosed'));
+  await until(() => store.matches.values().next().value?.status === 'finished');
+  const me = await fetch(`http://127.0.0.1:${app.port}/api/me`, { headers: { authorization: `Bearer ${identity.token}` } }).then(r => r.json());
+  assert.equal(me.player.stats.matches, 1);
+  const match = [...store.matches.values()][0];
+  await store.finishMatch(match.result); assert.equal((await store.getPlayer(identity.playerId)).stats.matches, 1);
+  assert.equal((await store.history(identity.playerId)).length, 1);
+});
+test('Disconnect expiry closes the room and saves server-earned progress', async t => {
+  const app = await startBackend({ config: { ...config, reconnectMs: 80 }, store: new MemoryStore() });
+  t.after(() => app.close());
+  const a = await client(app.port), b = await client(app.port);
+  t.after(() => { a.ws.terminate(); b.ws.terminate(); });
+  a.send({ type: 'join', name: 'A', skin: 1 }); await until(() => a.state());
+  b.send({ type: 'join', name: 'B', skin: 3, code: a.state().code }); await until(() => b.state());
+  a.send({ type: 'start' }); await until(() => b.state()?.running);
+  a.ws.terminate();
+  await until(() => b.messages.some(m => m.type === 'roomClosed'));
+  await until(() => app.pendingSaves.size === 0);
+  assert.equal(app.rooms.size, 0);
+});
+test('HTTP profiles require bearer auth and WebSocket origins are checked', async t => {
+  const app = await startBackend({ config, store: new MemoryStore() }); t.after(() => app.close());
+  const base = `http://127.0.0.1:${app.port}`;
+  assert.equal((await fetch(`${base}/api/me`)).status, 401);
+  assert.equal((await fetch(`${base}/readyz`)).status, 200);
+  const guest = await fetch(`${base}/api/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Friend' }) }).then(r => r.json());
+  assert.ok(guest.token); assert.equal(guest.player.name, 'Friend'); assert.equal(guest.player.tokenHash, undefined);
+  assert.equal((await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${guest.token}` } })).status, 200);
+  assert.equal((await fetch(`${base}/healthz`, { headers: { origin: 'https://untrusted.invalid' } })).status, 403);
+  const ws = new WebSocket(`ws://127.0.0.1:${app.port}/ws`, { origin: 'https://untrusted.invalid' });
+  const error = await new Promise(resolve => ws.once('error', resolve)); assert.match(error.message, /403/);
+});

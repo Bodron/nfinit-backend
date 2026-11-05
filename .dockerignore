@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.dart_tool
+**/.cache
+**/.env
+**/.env.*
+**/*credentials*
+**/*secrets*
+**/*.log
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+build
+coverage

@@ -1,0 +1,4 @@
+name: nfinit_coop_engine
+publish_to: none
+environment:
+  sdk: ^3.13.5
