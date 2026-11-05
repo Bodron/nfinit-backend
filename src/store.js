@@ -11,9 +11,14 @@ function guest(name) {
 }
 function rewards(profile, player, result) {
   return { matches: profile.stats.matches + 1, kills: profile.stats.kills + player.kills,
-    bestWave: Math.max(profile.stats.bestWave, result.completedWaves),
+    bestWave: Math.max(profile.stats.bestWave, result.completedWaves > 0 ? (result.startWave || 1) + result.completedWaves - 1 : 0),
     weaponXp: (BigInt(profile.stats.weaponXp) + BigInt(player.weaponXp)).toString(),
     essence: (BigInt(profile.stats.essence) + BigInt(player.essence)).toString() };
+}
+function progressed(previous, applied) {
+  return { schemaVersion: 1, values: { ...(previous?.document?.values ?? {}),
+    journey_v1: previous?.document?.values?.journey_v1 ?? applied.journey,
+    champions_v1: applied.champions } };
 }
 export class MongoStore {
   constructor(uri, dbName) { this.client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000, maxPoolSize: 10 }); this.db = this.client.db(dbName); }
@@ -63,6 +68,27 @@ export class MongoStore {
   async beginMatch(id, code, players) {
     await this.matches.insertOne({ _id: id, roomCode: code, players, status: 'running', startedAt: new Date() });
   }
+  async saveCoopProgress(event, apply) {
+    const session = this.client.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const match = await this.matches.findOne({ _id: event.id }, { session });
+        if (!match || event.states.length !== 2 || new Set(event.states.map(p => p.id)).size !== 2 ||
+            !event.states.every(p => match.players.some(q => q.id === p.id && q.skin === p.state.self.skin))) throw new Error('Invalid progress participants');
+        if ((match.progressSequence ?? 0) >= event.sequence) return;
+        for (const player of event.states) {
+          const previous = await this.progress.findOne({ _id: player.id }, { session });
+          const applied = await apply(previous?.document?.values?.champions_v1, player.state, event.id);
+          await this.progress.replaceOne({ _id: player.id }, { _id: player.id,
+            revision: (previous?.revision ?? 0) + 1, updatedAt: new Date(),
+            document: progressed(previous, applied), receipts: previous?.receipts ?? [],
+            history: [...(previous?.history ?? []), ...(previous ? [publicProgress(previous)] : [])].slice(-3),
+          }, { upsert: true, session });
+        }
+        await this.matches.updateOne({ _id: event.id }, { $set: { progressSequence: event.sequence } }, { session });
+      }, { writeConcern: { w: 'majority' } });
+    } finally { await session.endSession(); }
+  }
   async finishMatch(result) {
     const session = this.client.startSession();
     try {
@@ -106,6 +132,21 @@ export class MemoryStore {
     return { accepted: true, revision };
   }
   async beginMatch(id, code, players) { if (this.matches.has(id)) throw new Error('Duplicate match'); this.matches.set(id, { id, roomCode: code, players, status: 'running', startedAt: new Date() }); }
+  async saveCoopProgress(event, apply) {
+    const match = this.matches.get(event.id);
+    if (!match || event.states.length !== 2 || new Set(event.states.map(p => p.id)).size !== 2 ||
+        !event.states.every(p => match.players.some(q => q.id === p.id && q.skin === p.state.self.skin))) throw new Error('Invalid progress participants');
+    if ((match.progressSequence ?? 0) >= event.sequence) return;
+    const updates = [];
+    for (const player of event.states) {
+      const previous = this.progress.get(player.id);
+      const applied = await apply(previous?.document?.values?.champions_v1, player.state, event.id);
+      updates.push([player.id, { revision: (previous?.revision ?? 0) + 1, updatedAt: new Date(),
+        document: progressed(previous, applied), receipts: previous?.receipts ?? [] }]);
+    }
+    for (const [id, value] of updates) this.progress.set(id, value);
+    match.progressSequence = event.sequence;
+  }
   async finishMatch(result) {
     const match = this.matches.get(result.id); if (!match) throw new Error('Unknown match'); if (match.status === 'finished') return;
     for (const player of result.players) { const p = this.players.get(player.id); p.stats = rewards(p, player, result); }

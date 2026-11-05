@@ -92,7 +92,7 @@ abstract final class ChampionRules {
       ((state['myScore'] as Map?)?['activeSeconds'] as num? ?? 0) >= 15;
 }
 
-/// Permanent champion preparation for local runs. Online always selects [base].
+/// Permanent preparation for local and co-op runs. Legacy infection uses [base].
 class ChampionLoadout {
   const ChampionLoadout({
     this.level = 1,

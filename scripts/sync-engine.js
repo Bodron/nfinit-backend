@@ -11,7 +11,9 @@ const safe = name => /^(game|content)\/[a-z0-9_/]+\.dart$/.test(name);
 
 try {
   if (existsSync(resolve(appLib, 'game/engine.dart')) && existsSync(resolve(backend, '../pubspec.yaml'))) {
-    const pending = [resolve(appLib, 'game/engine.dart')], files = new Map();
+    const worker = readFileSync(resolve(backend, 'engine/worker.dart'), 'utf8');
+    const pending = [...worker.matchAll(/^import ['"]lib\/([^'"]+)['"]/gm)]
+      .map(match => resolve(appLib, match[1])), files = new Map();
     while (pending.length) {
       const path = pending.pop(), name = relative(appLib, path).split(sep).join('/');
       if (files.has(name)) continue;

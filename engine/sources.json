@@ -36,7 +36,7 @@
     },
     {
       "path": "game/champion_progress.dart",
-      "sha256": "07f7aa1c95445a7e7a91823e1367bd997713efd82de72bd0d8dbf4ab4164c477"
+      "sha256": "6b654de87dee6c12c9e4fb44d7b0606601f531a5a8c3c34b6e32f7c25aedd90f"
     },
     {
       "path": "game/chapter_finales.dart",
@@ -68,7 +68,7 @@
     },
     {
       "path": "game/engine.dart",
-      "sha256": "cd85263dcb3df177328a801c724f699bced5ee5f39bca0e09f9d298024f89c4b"
+      "sha256": "95e96f7407241b1217b94e71418b08215a0769d959afafdb88c00aad687a3882"
     },
     {
       "path": "game/game_int.dart",
@@ -81,6 +81,10 @@
     {
       "path": "game/heroes.dart",
       "sha256": "b175adfccfd65f1b783196a1affe1f846266e5838b0239cf2eda34717e907908"
+    },
+    {
+      "path": "game/journey.dart",
+      "sha256": "21f9f420a6463e7e43fbc30ce1bdd57ed91b6fac6f03be939f1f5768ab6279be"
     },
     {
       "path": "game/manor_layout.dart",

@@ -10,7 +10,7 @@ const engineBin = fileURLToPath(new URL('../build/nfinit-engine', import.meta.ur
 const config = { host: '127.0.0.1', port: 0, origins: new Set(), maxRooms: 5, reconnectMs: 1000, engineBin };
 async function until(fn, ms = 5000) {
   const end = Date.now() + ms;
-  while (Date.now() < end) { if (fn()) return fn(); await new Promise(r => setTimeout(r, 20)); }
+  while (Date.now() < end) { const value = await fn(); if (value) return value; await new Promise(r => setTimeout(r, 20)); }
   throw new Error('Timed out waiting for server state');
 }
 async function client(port) {
@@ -37,10 +37,15 @@ test('Two real clients play co-op, reject a third, reconnect and persist one res
   const b = await client(app.port); t.after(() => b.ws.terminate());
   b.send({ type: 'join', code, name: 'Brum', skin: 2 });
   await until(() => b.state()?.humanCount === 2 && a.state()?.humanCount === 2);
-  b.send({ type: 'start' }); await until(() => b.error('host_only'));
+  b.send({ type: 'start' }); await until(() => b.state()?.readyCount === 1);
+  assert.equal(b.state().running, false);
+  b.send({ type: 'ready', ready: false }); await until(() => b.state()?.readyCount === 0);
   const c = await client(app.port); t.after(() => c.ws.terminate());
   c.send({ type: 'join', code, name: 'Third', skin: 1 }); await until(() => c.error('room_unavailable'));
   a.send({ type: 'start', wave: 9999, health: 1e30 });
+  await until(() => a.state()?.readyCount === 1);
+  assert.equal(a.state().running, false);
+  b.send({ type: 'start' });
   await until(() => a.state()?.running && b.state()?.running);
   assert.equal(a.state().wave, 1); assert.equal(a.state().hunter, false); assert.equal(b.state().hunter, false);
   assert.equal(a.state().combat, true); assert.equal(a.state().party.length, 2);
@@ -76,7 +81,7 @@ test('Disconnect expiry closes the room and saves server-earned progress', async
   t.after(() => { a.ws.terminate(); b.ws.terminate(); });
   a.send({ type: 'join', name: 'A', skin: 1 }); await until(() => a.state());
   b.send({ type: 'join', name: 'B', skin: 3, code: a.state().code }); await until(() => b.state());
-  a.send({ type: 'start' }); await until(() => b.state()?.running);
+  a.send({ type: 'start' }); b.send({ type: 'start' }); await until(() => b.state()?.running);
   a.ws.terminate();
   await until(() => b.messages.some(m => m.type === 'roomClosed'));
   await until(() => app.pendingSaves.size === 0);
@@ -93,4 +98,53 @@ test('HTTP profiles require bearer auth and WebSocket origins are checked', asyn
   assert.equal((await fetch(`${base}/healthz`, { headers: { origin: 'https://untrusted.invalid' } })).status, 403);
   const ws = new WebSocket(`ws://127.0.0.1:${app.port}/ws`, { origin: 'https://untrusted.invalid' });
   const error = await new Promise(resolve => ws.once('error', resolve)); assert.match(error.message, /403/);
+});
+
+test('50 and 75 start together at 51 with individual gear and both advance without losing higher progress', async t => {
+  const store = new MemoryStore(), app = await startBackend({ config, store }); t.after(() => app.close());
+  const profiles = await Promise.all([store.createGuest('Lower'), store.createGuest('Higher')]);
+  for (const [i, profile] of profiles.entries()) {
+    const champions = JSON.stringify({ championProgressVersion: 3, heroRosterVersion: 2,
+      essence: 60, champions: Array.from({ length: 4 }, (_, skin) => ({ xp: skin === i ? 10000 * (i + 1) : 0,
+        weapon: { xp: skin === i ? 500 * (i + 1) : 0 },
+        ...(skin === i ? { dungeonCheckpoint: { wave: i ? 75 : 50, xp: 100, damage: 2, haste: 1, volley: 0 } } : {}),
+      })) });
+    await store.saveProgress(profile.player.id, { baseRevision: 0, mutationId: String(i).repeat(48),
+      document: { schemaVersion: 1, values: { champions_v1: champions, name: profile.player.name } } });
+  }
+  const a = await client(app.port), b = await client(app.port); t.after(() => { a.ws.terminate(); b.ws.terminate(); });
+  a.send({ type: 'join', token: profiles[0].token, skin: 0 }); await until(() => a.state());
+  b.send({ type: 'join', token: profiles[1].token, skin: 1, code: a.state().code }); await until(() => b.state()?.humanCount === 2);
+  assert.equal(b.state().coopStartWave, 51);
+  a.send({ type: 'start', wave: 999 }); await until(() => a.state()?.readyCount === 1);
+  assert.equal(a.state().running, false);
+  b.send({ type: 'start' }); await until(() => a.state()?.running && b.state()?.running);
+  assert.equal(a.state().startWave, 51); assert.equal(b.state().startWave, 51);
+  assert.ok(a.state().championLevel > 1); assert.ok(b.state().championLevel > a.state().championLevel);
+  assert.equal(a.state().damageUpgrades, 2); assert.equal(b.state().damageUpgrades, 2);
+  const room = app.rooms.get(a.state().code), id = room.matchId;
+  const event = { code: room.code, id, sequence: 100, states: profiles.map((p, skin) => ({ id: p.player.id,
+    state: { mode: 'survival', demo: true, startWave: 51, completedWaves: 25,
+      combatXp: 130, damageUpgrades: 3, hasteUpgrades: 1, volleyUpgrades: 0,
+      weaponXpEarned: 5, lootEssenceEarned: 3, self: { skin } } })) };
+  // Trusted worker event, never accepted from a WebSocket client.
+  app.engine.emit('progress', event);
+  await until(async () => (await store.getProgress(profiles[0].player.id)).revision > 1 && !app.pendingProgress.size);
+  const saved = await Promise.all(profiles.map(p => store.getProgress(p.player.id)));
+  for (const [skin, value] of saved.entries()) {
+    const progress = JSON.parse(value.document.values.champions_v1);
+    assert.equal(progress.champions[skin].dungeonCheckpoint.wave, 75);
+    assert.equal(progress.bestWave, 75); assert.ok(progress.essence > 60);
+    assert.equal(value.document.values.name, profiles[skin].player.name);
+  }
+  app.engine.emit('progress', event);
+  await until(() => !app.pendingProgress.size);
+  assert.deepEqual(await Promise.all(profiles.map(p => store.getProgress(p.player.id))), saved);
+  const next = { ...event, sequence: 101, states: event.states.map(p => ({ ...p,
+    state: { ...p.state, completedWaves: 50, weaponXpEarned: 9, lootEssenceEarned: 6 } })) };
+  app.engine.emit('progress', next);
+  await until(async () => JSON.parse((await store.getProgress(profiles[1].player.id)).document.values.champions_v1).champions[1].dungeonCheckpoint.wave === 100);
+  for (const [skin, profile] of profiles.entries()) {
+    assert.equal(JSON.parse((await store.getProgress(profile.player.id)).document.values.champions_v1).champions[skin].dungeonCheckpoint.wave, 100);
+  }
 });

@@ -74,7 +74,7 @@ MongoDB. Pentru Flutter Web adaugă originile exacte în `ALLOWED_ORIGINS`.
 ## Co-op
 
 Primul jucător creează camera și trimite codul de cinci caractere prietenului.
-Gazda poate începe numai când sunt conectați exact doi campioni.
+Ambii jucători apasă Start. Partida începe numai când ambii sunt conectați și pregătiți; oricare poate anula confirmarea înainte de pornire.
 
 - Fiecare campion are propriile skilluri și cooldown-uri; nu există friendly fire.
 - Monștrii au 1,65× HP. Ambii jucători primesc valoarea întreagă a lootului
@@ -85,11 +85,21 @@ Gazda poate începe numai când sunt conectați exact doi campioni.
   de `RECONNECT_GRACE_SECONDS`, implicit 30 de secunde.
 - Clientul trimite comenzi, iar serverul calculează mișcarea, skillurile,
   damage-ul, wave-urile și recompensele. Nu acceptă HP/XP/wave declarate de client.
-- Partidele co-op folosesc echipamentul de bază. Progresul solo salvat în cloud
-  nu acordă upgrade-uri în simularea co-op și nu modifică statisticile autoritare.
+- Fiecare joacă cu nivelul, arma și upgrade-urile campionului ales, citite de
+  server din backupul Atlas. Ultimul checkpoint al acelui campion stabilește
+  intrarea, nu recordul global al profilului sau un wave declarat prin WebSocket.
+- Se alege checkpoint-ul mai mic. Pentru 50 și 75, se reia după 50, de la wave 51.
+  Pentru un campion fără checkpoint se începe de la wave 1.
+- Progresul câștigat împreună se salvează pentru ambii campioni în `player_progress`.
+  Checkpoint-urile sunt din 25 în 25 și nu scad: campionul deja la 75 îl păstrează
+  în timp ce partenerul avansează de la 50; la 100 ambii au checkpoint-ul 100.
+  XP-ul, esența și lootul se confirmă după fiecare wave terminat și la final/ieșire.
+- Ambii campioni se salvează în aceeași tranzacție MongoDB. Numărul secvenței și
+  evidența cumulativă a recompenselor fac retry-urile idempotente. O cădere sau
+  închiderea camerei nu anulează recompensele deja confirmate.
 
 Simularea rulează într-un proces Dart, folosind aceleași reguli ca jocul.
-`engine/lib/` conține cele 38 de surse Dart pure necesare serverului, fără UI
+`engine/lib/` conține sursele Dart pure necesare serverului, fără UI
 sau dependențe Flutter. `engine/sources.json` verifică integritatea lor.
 În checkout-ul jocului, `npm run sync:engine` actualizează această copie din
 sursele comune; în acest repository standalone verifică sursele incluse.
@@ -111,8 +121,8 @@ păstrate ca șiruri pentru a conserva exact valorile mari.
 Uploadul folosește compare-and-set pe revizie și un ID de request. Un retry
 nu dublează salvarea; o versiune concurentă produce HTTP 409, fără suprascriere
 automată. Clientul oferă alegerea versiunii și păstrează backupul celeilalte.
-MongoDB confirmă scrierile cu `majority`. Statisticile co-op rămân separate de
-backupul solo. Rezultatul și totalurile celor doi jucători sunt actualizate
+MongoDB confirmă scrierile cu `majority`. Statisticile co-op rămân separate, iar recompensele autoritare ale partidei
+actualizează și campionii din backupul comun. Rezultatul și totalurile celor doi jucători sunt actualizate
 în aceeași tranzacție MongoDB, idempotent, după ID-ul partidei.
 
 Identitatea este momentan guest. Tokenul aleator este păstrat pe dispozitiv;
@@ -147,13 +157,18 @@ Documentul de progres are schema `{schemaVersion: 1, values: {...}}`, maximum
 `revision` este 0 și `document` este null. Tokenurile nu sunt incluse în snapshot.
 
 WebSocket `/ws` primește `join`, `start`, `move`, `voice`, `action` și `leave`.
-Emite `identity`, `state` (20 Hz), `error`, `matchSaved` și `roomClosed`.
+Emite `identity`, `state` (20 Hz), `error`, `progressSaved`, `matchSaved` și
+`roomClosed`. Lobby-ul include `ready`, `readyCount`, `starting`, `coopStartWave`
+și starea fiecărui participant din `party`. `{"type":"ready","ready":true}` confirmă
+Start; `false` anulează. `start` este un alias pentru confirmarea personală.
+Confirmările sunt resetate la deconectare, la schimbarea participanților și la
+sfârșitul partidei; un rematch cere din nou confirmarea ambilor.
 Mesajele au maximum 4 KiB și sunt limitate la 140 mesaje/secundă/client.
 
 ```json
 {"type":"join","name":"Nyx","skin":0,"code":""}
 {"type":"join","name":"Brum","skin":2,"code":"ABCDE","token":"TOKEN_SALVAT"}
-{"type":"start"}
+{"type":"ready","ready":true}
 {"type":"move","dx":0.7,"dy":-0.7}
 {"type":"action","action":"skill:0"}
 {"type":"leave"}

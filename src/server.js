@@ -34,7 +34,7 @@ async function jsonBody(req, limit = 8192) {
 }
 
 export async function startBackend({ config, store, engine = new Engine(), logger = console }) {
-  const rooms = new Map(), reservations = new Map(), pendingSaves = new Map(), limits = new Map();
+  const rooms = new Map(), reservations = new Map(), pendingSaves = new Map(), pendingProgress = new Map(), limits = new Map();
   let shuttingDown = false, retrying = false;
   const log = event => logger.error(JSON.stringify({ event })); // Deliberately excludes URIs and tokens.
   function rate(key, max, windowMs) {
@@ -51,14 +51,43 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     const connected = [...room.members.values()].filter(m => m.socket?.readyState === WebSocket.OPEN).length;
     return { ...state, coop: true, maxPlayers: 2, humanCount: room.members.size,
       connectedPlayers: connected, reconnecting: connected < room.members.size,
+      readyCount: [...room.members.values()].filter(m => m.ready).length,
+      ready: room.members.get(state.id)?.ready === true, starting: room.busy,
+      coopStartWave: Math.min(...[...room.members.values()].map(m => checkpointOf(m) + 1)),
       matchId: room.matchId || null, rewardsSaved: room.matchId ? room.saved.has(room.matchId) : false,
-      party: state.party?.map(p => ({ ...p, connected: !!room.members.get(p.id)?.socket && room.members.get(p.id).socket.readyState === WebSocket.OPEN })),
+      party: state.party?.map(p => ({ ...p, ready: room.members.get(p.id)?.ready === true,
+        checkpointWave: checkpointOf(room.members.get(p.id)),
+        connected: !!room.members.get(p.id)?.socket && room.members.get(p.id).socket.readyState === WebSocket.OPEN })),
     };
   }
+  function checkpointOf(member) {
+    try {
+      const raw = JSON.parse(member?.progress?.document?.values?.champions_v1 ?? '{}');
+      const value = raw.champions?.[member.skin]?.dungeonCheckpoint?.wave;
+      return Number.isSafeInteger(value) && value > 0 && value % 25 === 0 ? value : 0;
+    } catch { return 0; }
+  }
+  function publishLobby(room) {
+    for (const [id, state] of room.last) send(room.members.get(id)?.socket, decorate(room, state));
+  }
+  function clearReady(room) { for (const member of room.members.values()) member.ready = false; }
   async function savePending() {
     if (retrying) return; retrying = true;
     try {
+      for (const [id, item] of pendingProgress) {
+        try {
+          await store.saveCoopProgress(item.event, (champions, state, runId) =>
+            engine.command('rewardProgress', { champions: champions ?? null, state, runId }));
+          if (pendingProgress.get(id) === item) pendingProgress.delete(id);
+          for (const member of item.room.members.values()) {
+            member.progress = await store.getProgress(member.player.id);
+            send(member.socket, { type: 'progressSaved', matchId: id, sequence: item.event.sequence });
+          }
+          publishLobby(item.room);
+        } catch { log('champion_progress_save_pending'); }
+      }
       for (const [id, item] of pendingSaves) {
+        if (pendingProgress.has(id)) continue;
         try {
           await store.finishMatch(item.result); pendingSaves.delete(id); item.room.saved.add(id);
           for (const member of item.room.members.values()) send(member.socket, { type: 'matchSaved', matchId: id, rewardsSaved: true });
@@ -73,7 +102,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
   function fallbackResult(room, reason) {
     const states = [...room.last.values()];
     return { id: room.matchId, roomCode: room.code, outcome: reason,
-      wave: states[0]?.wave || 1, completedWaves: states[0]?.completedWaves || 0,
+      wave: states[0]?.wave || 1, completedWaves: states[0]?.completedWaves || 0, startWave: states[0]?.startWave || 1,
       elapsed: states[0]?.elapsed || 0,
       players: [...room.members.values()].map(m => {
         const state = room.last.get(m.player.id);
@@ -100,7 +129,13 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     if (message.type === 'state') room.last.set(to, message);
     send(room.members.get(to)?.socket, message.type === 'state' ? decorate(room, message) : message);
   });
-  engine.on('result', ({ code, result }) => { const room = rooms.get(code); if (room && result.id === room.matchId) queueSave(room, result); });
+  engine.on('result', ({ code, result }) => { const room = rooms.get(code); if (room && result.id === room.matchId) { clearReady(room); queueSave(room, result); } });
+  engine.on('progress', event => {
+    const room = rooms.get(event.code); if (!room || event.id !== room.matchId) return;
+    if (event.sequence > (pendingProgress.get(event.id)?.event.sequence ?? 0)) {
+      pendingProgress.set(event.id, { room, event }); void savePending();
+    }
+  });
   engine.on('engineError', ({ code }) => { const room = rooms.get(code); if (room) void closeRoom(room, 'Game engine stopped. Rejoin a new room.'); });
   engine.on('lost', () => { if (!shuttingDown) { log('engine_stopped'); for (const room of rooms.values()) void closeRoom(room, 'Game engine stopped. Start a new room.'); } });
 
@@ -115,6 +150,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     let player, token;
     if (message.token) { player = await store.authenticate(message.token); if (!player) throw new Problem('invalid_token', 401); }
     else { const guest = await store.createGuest(nameOf(message.name)); player = guest.player; token = guest.token; }
+    const progress = await store.getProgress(player.id);
     if (peer.socket.readyState !== WebSocket.OPEN) return;
     const reserved = reservations.get(player.id);
     if (reserved && reserved !== code) throw new Problem('already_in_room');
@@ -128,7 +164,8 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     const reconnect = !!member;
     if (member?.socket?.readyState === WebSocket.OPEN) throw new Problem('already_connected');
     if (!member && (room.members.size >= 2 || room.matchId)) throw new Problem('room_unavailable');
-    if (!member) { member = { player, skin: message.skin ?? 0, socket: peer.socket }; room.members.set(player.id, member); }
+    if (!member) { member = { player, skin: message.skin ?? 0, socket: peer.socket, ready: false,
+      progress }; room.members.set(player.id, member); clearReady(room); }
     else { clearTimeout(member.expiry); member.socket = peer.socket; }
     peer.member = member; peer.room = room; reservations.set(player.id, room.code);
     clearTimeout(peer.joinTimeout);
@@ -145,20 +182,32 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     const room = peer.room, member = peer.member;
     if (!room || !member || room.closing || member.socket !== peer.socket) throw new Problem('not_joined');
     if (m.type === 'leave') return closeRoom(room, 'A teammate left the room.');
-    if (m.type === 'start') {
+    if (m.type === 'start' || m.type === 'ready') {
+      if (m.type === 'ready' && typeof m.ready !== 'boolean') throw new Problem('invalid_message');
       if (room.busy) throw new Problem('start_pending');
-      if ([...room.members.keys()][0] !== member.player.id) throw new Problem('host_only');
       if (room.members.size !== 2 || [...room.members.values()].some(p => p.socket?.readyState !== WebSocket.OPEN)) throw new Problem('need_two_players');
       if ([...room.last.values()].some(s => s.running)) throw new Problem('already_running');
       if (room.matchId && !room.saved.has(room.matchId)) throw new Problem('save_pending');
+      member.ready = m.type === 'start' || m.ready;
+      publishLobby(room);
+      if (![...room.members.values()].every(p => p.ready)) return;
       room.busy = true;
+      publishLobby(room);
       try {
         await store.ping();
+        const progress = {};
+        for (const participant of room.members.values()) {
+          participant.progress = await store.getProgress(participant.player.id);
+          progress[participant.player.id] = participant.progress.document?.values?.champions_v1 ?? null;
+        }
+        if ([...room.members.values()].some(p => !p.ready || p.socket?.readyState !== WebSocket.OPEN)) return;
         const runId = randomUUID();
         await store.beginMatch(runId, room.code, [...room.members.values()].map(m => ({ id: m.player.id, name: m.player.name, skin: m.skin })));
         room.matchId = runId;
-        await engine.command('start', { code: room.code, playerId: member.player.id, runId });
-      } finally { room.busy = false; }
+        await engine.command('start', { code: room.code, playerId: [...room.members.keys()][0], runId, progress });
+        await engine.command('pause', { code: room.code, paused: [...room.members.values()].some(p => p.socket?.readyState !== WebSocket.OPEN) });
+      } catch (error) { clearReady(room); throw error; }
+      finally { room.busy = false; publishLobby(room); }
       return;
     }
     await engine.command('input', { code: room.code, playerId: member.player.id, input: inputOf(m) });
@@ -168,6 +217,8 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     const room = peer.room, member = peer.member;
     if (!room || !member || room.closing || member.socket !== peer.socket) return;
     member.socket = null;
+    clearReady(room);
+    publishLobby(room);
     void engine.command('pause', { code: room.code, paused: true }).catch(() => closeRoom(room, 'Engine unavailable.'));
     member.expiry = setTimeout(() => void closeRoom(room, 'Reconnect time expired. The co-op run ended.'), config.reconnectMs);
     member.expiry.unref();
@@ -236,11 +287,11 @@ export async function startBackend({ config, store, engine = new Engine(), logge
   const retry = setInterval(() => void savePending(), 2000); retry.unref();
   try { await store.open(); await engine.open(config.engineBin); await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); }); }
   catch (error) { clearInterval(heartbeat); clearInterval(retry); await engine.close(); await store.close(); throw error; }
-  return { server, rooms, engine, pendingSaves, port: server.address().port,
+  return { server, rooms, engine, pendingSaves, pendingProgress, port: server.address().port,
     async close() {
       shuttingDown = true; clearInterval(heartbeat); clearInterval(retry);
       await Promise.all([...rooms.values()].map(room => closeRoom(room, 'Server restarting.')));
-      for (let i = 0; i < 10 && (pendingSaves.size || retrying); i++) { await savePending(); if (pendingSaves.size || retrying) await new Promise(r => setTimeout(r, 200)); }
+      for (let i = 0; i < 10 && (pendingSaves.size || pendingProgress.size || retrying); i++) { await savePending(); if (pendingSaves.size || pendingProgress.size || retrying) await new Promise(r => setTimeout(r, 200)); }
       if (pendingSaves.size) log('unsaved_results_at_shutdown');
       for (const ws of wss.clients) ws.terminate();
       await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => server.close(resolve));

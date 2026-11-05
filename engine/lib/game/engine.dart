@@ -1473,7 +1473,7 @@ class Room {
   final String code;
   final bool demo;
   ChampionLoadout loadoutFor(Player p) =>
-      demo && !p.isBot ? p.upgrades : ChampionLoadout.base;
+      (demo || cooperative) && !p.isBot ? p.upgrades : ChampionLoadout.base;
   final players = <Player>[];
   int _momentSerial = 0;
   final _lures = <String, _Lure>{};
@@ -1753,18 +1753,20 @@ class Room {
     }
     if (survival) {
       _prepareWave(fresh: true);
-      final runner = players.first;
-      final checkpoint = runner.checkpoint;
-      if (campaign == null &&
-          checkpoint != null &&
-          checkpoint.resumeWave == initialWave) {
-        runner.combatXp = checkpoint.xp;
-        runner.damageUpgrades = checkpoint.damage;
-        runner.hasteUpgrades = checkpoint.haste;
-        runner.volleyUpgrades = min(
-          checkpoint.volley,
-          9 - championWeapons[runner.skin].shots,
-        );
+      for (final runner
+          in cooperative ? players.where((p) => !p.isBot) : players.take(1)) {
+        final checkpoint = runner.checkpoint;
+        if (campaign == null &&
+            checkpoint != null &&
+            checkpoint.resumeWave == initialWave) {
+          runner.combatXp = checkpoint.xp;
+          runner.damageUpgrades = checkpoint.damage;
+          runner.hasteUpgrades = checkpoint.haste;
+          runner.volleyUpgrades = min(
+            checkpoint.volley,
+            9 - championWeapons[runner.skin].shots,
+          );
+        }
       }
     } else {
       message =

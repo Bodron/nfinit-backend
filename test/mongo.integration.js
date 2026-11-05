@@ -62,13 +62,35 @@ test('Real MongoDB transactions persist profiles and apply a match exactly once'
       host = await peer(app.port); friend = await peer(app.port);
       host.send({ type: 'join', token: a.token, skin: 0 }); await until(() => host.state());
       friend.send({ type: 'join', token: b.token, skin: 2, code: host.state().code }); await until(() => friend.state());
-      host.send({ type: 'start' }); await until(() => friend.state()?.running);
+      host.send({ type: 'start' }); friend.send({ type: 'start' }); await until(() => friend.state()?.running);
       assert.equal(friend.state().coop, true); assert.equal(friend.state().hunter, false);
       friend.send({ type: 'leave' });
       await until(async () => (await online.getPlayer(a.player.id)).stats.matches === 2);
       assert.equal((await online.getPlayer(b.player.id)).stats.matches, 2);
       const history = await online.history(a.player.id);
       assert.equal(history.length, 2); assert.equal(history[0].status, 'finished');
+      const progressPlayers = [{ id: a.player.id, skin: 0 }, { id: b.player.id, skin: 2 }];
+      await online.beginMatch('atomic-progress', 'PROGR', progressPlayers);
+      const event = { id: 'atomic-progress', sequence: 1, states: progressPlayers.map(p => ({ id: p.id,
+        state: { mode: 'survival', demo: true, startWave: 1, completedWaves: 25,
+          combatXp: 100, damageUpgrades: 2, hasteUpgrades: 1, volleyUpgrades: 0,
+          weaponXpEarned: 7, lootEssenceEarned: 3, self: { skin: p.skin } } })) };
+      const beforeProgress = await Promise.all(progressPlayers.map(p => online.getProgress(p.id)));
+      let calls = 0;
+      await assert.rejects(online.saveCoopProgress(event, async (champions, state, runId) => {
+        if (++calls === 2) throw new Error('Injected second champion failure');
+        return app.engine.command('rewardProgress', { champions, state, runId });
+      }));
+      assert.deepEqual(await Promise.all(progressPlayers.map(p => online.getProgress(p.id))), beforeProgress);
+      const apply = (champions, state, runId) => app.engine.command('rewardProgress', { champions, state, runId });
+      await Promise.all([online.saveCoopProgress(event, apply), online.saveCoopProgress(event, apply)]);
+      const afterProgress = await Promise.all(progressPlayers.map(p => online.getProgress(p.id)));
+      for (const [i, value] of afterProgress.entries()) {
+        assert.equal(value.revision, beforeProgress[i].revision + 1);
+        assert.equal(JSON.parse(value.document.values.champions_v1).champions[progressPlayers[i].skin].dungeonCheckpoint.wave, 25);
+      }
+      await online.saveCoopProgress(event, apply);
+      assert.deepEqual(await Promise.all(progressPlayers.map(p => online.getProgress(p.id))), afterProgress);
     } finally { host?.ws.terminate(); friend?.ws.terminate(); await app.close(); }
   } finally { await store.close(); await mongo.stop(); }
 });
