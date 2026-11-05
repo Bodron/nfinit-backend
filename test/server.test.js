@@ -92,6 +92,11 @@ test('HTTP profiles require bearer auth and WebSocket origins are checked', asyn
   const base = `http://127.0.0.1:${app.port}`;
   assert.equal((await fetch(`${base}/api/me`)).status, 401);
   assert.equal((await fetch(`${base}/readyz`)).status, 200);
+  const health = await fetch(`${base}/healthz`).then(r => r.json());
+  assert.equal(health.backendVersion, '1.1.0');
+  assert.equal(health.coopProtocol, 2);
+  assert.ok(health.capabilities.includes('shared-checkpoint'));
+  assert.ok(health.capabilities.includes('both-players-ready'));
   const guest = await fetch(`${base}/api/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Friend' }) }).then(r => r.json());
   assert.ok(guest.token); assert.equal(guest.player.name, 'Friend'); assert.equal(guest.player.tokenHash, undefined);
   assert.equal((await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${guest.token}` } })).status, 200);

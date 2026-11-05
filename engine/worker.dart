@@ -93,7 +93,7 @@ Future<void> main() async {
       }
     }
   });
-  emit({'event': 'ready', 'protocol': 1});
+  emit({'event': 'ready', 'protocol': 2});
   await for (final line
       in stdin.transform(utf8.decoder).transform(const LineSplitter())) {
     Map<String, dynamic>? command;

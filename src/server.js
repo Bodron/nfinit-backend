@@ -1,8 +1,13 @@
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import { randomInt, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Engine } from './engine.js';
 import { validProgressWrite } from './progress.js';
+
+const { version: backendVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const protocol = { backendVersion, coopProtocol: 2,
+  capabilities: ['shared-checkpoint', 'both-players-ready', 'shared-champion-progress'] };
 
 class Problem extends Error { constructor(code, status = 400) { super(code); this.code = code; this.status = status; } }
 const nameOf = value => typeof value === 'string' && value.trim() ? value.trim().slice(0, 16) : 'Player';
@@ -49,7 +54,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
   }
   function decorate(room, state) {
     const connected = [...room.members.values()].filter(m => m.socket?.readyState === WebSocket.OPEN).length;
-    return { ...state, coop: true, maxPlayers: 2, humanCount: room.members.size,
+    return { ...state, coop: true, coopProtocol: protocol.coopProtocol, maxPlayers: 2, humanCount: room.members.size,
       connectedPlayers: connected, reconnecting: connected < room.members.size,
       readyCount: [...room.members.values()].filter(m => m.ready).length,
       ready: room.members.get(state.id)?.ready === true, starting: room.busy,
@@ -169,7 +174,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     else { clearTimeout(member.expiry); member.socket = peer.socket; }
     peer.member = member; peer.room = room; reservations.set(player.id, room.code);
     clearTimeout(peer.joinTimeout);
-    send(peer.socket, { type: 'identity', protocol: 1, playerId: player.id, ...(token ? { token } : {}) });
+    send(peer.socket, { type: 'identity', protocol: protocol.coopProtocol, playerId: player.id, ...(token ? { token } : {}) });
     try {
       if (!reconnect) await engine.command('join', { code: room.code, playerId: player.id, name: player.name, skin: member.skin });
       const allHere = [...room.members.values()].every(m => m.socket?.readyState === WebSocket.OPEN);
@@ -236,8 +241,8 @@ export async function startBackend({ config, store, engine = new Engine(), logge
       if (req.method === 'OPTIONS') return reply(204, {});
       rate(`http:${req.socket.remoteAddress}`, 120, 60000);
       const path = new URL(req.url, 'http://localhost').pathname;
-      if (path === '/health' || path === '/healthz') return reply(200, { ok: true, service: 'nfinit-coop', rooms: rooms.size, maxPlayers: 2 });
-      if (path === '/readyz') { if (!engine.ready || shuttingDown) throw new Problem('not_ready', 503); await store.ping(); return reply(200, { ok: true }); }
+      if (path === '/health' || path === '/healthz') return reply(200, { ok: true, service: 'nfinit-coop', rooms: rooms.size, maxPlayers: 2, ...protocol });
+      if (path === '/readyz') { if (!engine.ready || shuttingDown) throw new Problem('not_ready', 503); await store.ping(); return reply(200, { ok: true, ...protocol }); }
       if (path === '/api/session' && req.method === 'POST') {
         rate(`guest:${req.socket.remoteAddress}`, 10, 60000);
         return reply(201, await store.createGuest(nameOf((await jsonBody(req)).name)));

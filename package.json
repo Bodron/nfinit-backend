@@ -1,9 +1,11 @@
 {
   "name": "nfinit-coop-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/index.js",
     "dev": "node --env-file-if-exists=.env --watch src/index.js",
@@ -13,6 +15,11 @@
     "test": "node --test test/*.test.js",
     "test:mongo": "node --test test/mongo.integration.js"
   },
-  "dependencies": { "mongodb": "^7.8.0", "ws": "^8.22.1" },
-  "devDependencies": { "mongodb-memory-server": "^11.0.0" }
+  "dependencies": {
+    "mongodb": "^7.8.0",
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.0.0"
+  }
 }

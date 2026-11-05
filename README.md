@@ -36,6 +36,13 @@ curl http://localhost:8081/readyz
 ```
 
 `healthz` verifică procesul HTTP; `readyz` verifică MongoDB și motorul co-op.
+
+Versiunea **1.1.0** folosește **coopProtocol 2**. După rebuild/redeploy din `main`,
+`/healthz` și `/readyz` trebuie să includă `backendVersion: "1.1.0"`,
+`coopProtocol: 2` și capabilitățile `shared-checkpoint`, `both-players-ready`,
+`shared-champion-progress`. Un simplu `ok: true` fără aceste câmpuri indică
+backendul vechi. Uploadul aplicației în TestFlight nu actualizează serverul.
+
 În Atlas permite IP-ul hostului și folosește un database user cu read/write.
 Contul cu care intri pe site-ul Atlas este diferit de utilizatorul bazei.
 Parola din URI trebuie codificată corect dacă include caractere speciale.
