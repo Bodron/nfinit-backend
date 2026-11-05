@@ -18,7 +18,11 @@ class Match {
   int progressSequence = 0, savedCompleted = -1;
   bool finalProgressSent = false;
 
-  void tick() {
+  int idleTicks = 0;
+  void tick({bool force = false}) {
+    if (!force && (!room.running || room.paused) && ++idleTicks % 20 != 0) {
+      return;
+    }
     room.tick();
     if (room.cooperative &&
         runId != null &&
@@ -86,7 +90,15 @@ class Match {
 
 Future<void> main() async {
   final matches = <String, Match>{};
+  final samples = <int>[];
+  final watch = Stopwatch()..start();
+  var lastCallback = 0, callbackMax = 0;
   final timer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+    final start = watch.elapsedMicroseconds;
+    if (lastCallback > 0) {
+      callbackMax = math.max(callbackMax, start - lastCallback);
+    }
+    lastCallback = start;
     for (final match in matches.values.toList()) {
       try {
         match.tick();
@@ -94,6 +106,20 @@ Future<void> main() async {
         emit({'event': 'engineError', 'code': match.room.code});
         matches.remove(match.room.code);
       }
+    }
+    samples.add(watch.elapsedMicroseconds - start);
+    if (samples.length >= 200) {
+      samples.sort();
+      emit({
+        'event': 'metrics',
+        'tickMeanMs': samples.reduce((a, b) => a + b) / samples.length / 1000,
+        'tickP95Ms': samples[(samples.length * .95).floor()] / 1000,
+        'tickMaxMs': samples.last / 1000,
+        'callbackMaxMs': callbackMax / 1000,
+        'roomCount': matches.length,
+      });
+      samples.clear();
+      callbackMax = 0;
     }
   });
   emit({'event': 'ready', 'protocol': 2});
@@ -158,7 +184,7 @@ Future<void> main() async {
           }),
         );
         match.room.players.add(player);
-        match.tick();
+        match.tick(force: true);
       } else {
         if (match == null) throw StateError('room_not_found');
         final room = match.room;
@@ -180,7 +206,7 @@ Future<void> main() async {
             if (room.pvp) {
               room.paused = false;
               room.start();
-              match.tick();
+              match.tick(force: true);
               break;
             }
             final saved = command['progress'] as Map? ?? {};
@@ -229,7 +255,7 @@ Future<void> main() async {
             }
             match.room = prepared;
             prepared.start();
-            match.tick();
+            match.tick(force: true);
           case 'input':
             if (player == null) throw StateError('not_joined');
             if (room.paused || room.ended || player.health <= 0) break;
@@ -256,9 +282,9 @@ Future<void> main() async {
               p.setMovement(0, 0);
               p.voiceRun = false;
             }
-            match.tick();
+            match.tick(force: true);
           case 'snapshot':
-            match.tick();
+            match.tick(force: true);
           case 'finish':
             if (room.running) {
               final forfeitId = command['forfeitId'];
@@ -273,7 +299,7 @@ Future<void> main() async {
                 command['reason'] as String? ?? 'Co-op session ended.',
               );
             }
-            match.tick();
+            match.tick(force: true);
           case 'destroy':
             matches.remove(code);
           default:

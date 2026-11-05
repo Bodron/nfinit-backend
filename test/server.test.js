@@ -5,6 +5,7 @@ import { WebSocket } from 'ws';
 import { MemoryStore } from '../src/store.js';
 import { startBackend } from '../src/server.js';
 import { configFrom } from '../src/config.js';
+import { expand } from './state-frames.fixture.js';
 
 const engineBin = fileURLToPath(new URL('../build/nfinit-engine', import.meta.url));
 const config = { host: '127.0.0.1', port: 0, origins: new Set(), maxRooms: 5, reconnectMs: 1000, engineBin };
@@ -93,7 +94,7 @@ test('HTTP profiles require bearer auth and WebSocket origins are checked', asyn
   assert.equal((await fetch(`${base}/api/me`)).status, 401);
   assert.equal((await fetch(`${base}/readyz`)).status, 200);
   const health = await fetch(`${base}/healthz`).then(r => r.json());
-  assert.equal(health.backendVersion, '1.2.0');
+  assert.equal(health.backendVersion, '1.3.0');
   assert.equal(health.coopProtocol, 2);
   assert.equal(health.pvpProtocol, 1);
   assert.ok(health.capabilities.includes('hidden-target-immunity'));
@@ -227,4 +228,31 @@ test('PvP disconnect expiry awards the connected opponent after grace period', a
   a.ws.terminate();
   await until(() => store.matches.get(id)?.status === 'finished');
   assert.equal(store.matches.get(id).result.winnerId, survivor);
+});
+
+test('Delta and legacy clients coexist, negotiate compression, recover skipped frames and resynchronize', async t => {
+  const app=await startBackend({config,store:new MemoryStore()});t.after(()=>app.close());
+  const a=await client(app.port),b=await client(app.port);
+  t.after(()=>{a.ws.terminate();b.ws.terminate();});
+  const frames=()=>a.messages.filter(m=>m.type==='stateFrame');
+  const state=()=>frames().length?expand(frames()).at(-1):null;
+  a.send({type:'join',stateProtocol:1,name:'Compact',skin:0});
+  await until(()=>state());
+  assert.ok(a.ws.extensions.includes('permessage-deflate'));
+  assert.equal(a.messages.some(m=>m.type==='state'),false);
+  b.send({type:'join',name:'Build20',skin:2,code:state().code});await until(()=>b.state()?.humanCount===2);
+  assert.equal(b.messages.some(m=>m.type==='stateFrame'),false);
+  a.send({type:'start'});b.send({type:'start'});await until(()=>state()?.running&&b.state()?.running);
+  const member=app.rooms.get(state().code).members.get(state().id),socket=member.socket;
+  const before=state().elapsed;
+  Object.defineProperty(socket,'bufferedAmount',{configurable:true,get:()=>200*1024});
+  await until(()=>b.state().elapsed>before+.15);
+  assert.ok(socket.peer.skippedStates>0);
+  delete socket.bufferedAmount;
+  await until(()=>state().elapsed>before+.15);
+  assert.equal(state().self.id,state().id);
+  a.send({type:'resync'});await until(()=>frames().filter(f=>f.base===0).length>=2);
+  assert.equal(state().id,member.player.id);
+  const health=await fetch(`http://127.0.0.1:${app.port}/healthz`).then(r=>r.json());
+  assert.equal(health.stateProtocol,1);assert.ok(health.runtime.eventLoopDelayP95Ms>=0);
 });

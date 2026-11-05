@@ -4,10 +4,12 @@ import { randomInt, randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Engine } from './engine.js';
 import { validProgressWrite } from './progress.js';
+import { StateFrames } from './state-frames.js';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 const { version: backendVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-const protocol = { backendVersion, coopProtocol: 2, pvpProtocol: 1,
-  capabilities: ['shared-checkpoint', 'both-players-ready', 'shared-champion-progress', 'pvp-1v1', 'hidden-target-immunity'] };
+const protocol = { backendVersion, coopProtocol: 2, pvpProtocol: 1, stateProtocol: 1,
+  capabilities: ['shared-checkpoint', 'both-players-ready', 'shared-champion-progress', 'pvp-1v1', 'hidden-target-immunity', 'delta-state-frames', 'websocket-compression'] };
 
 class Problem extends Error { constructor(code, status = 400) { super(code); this.code = code; this.status = status; } }
 const nameOf = value => typeof value === 'string' && value.trim() ? value.trim().slice(0, 16) : 'Player';
@@ -27,9 +29,12 @@ function inputOf(m) {
 }
 function send(ws, message) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (ws.bufferedAmount > 1024 * 1024) { ws.terminate(); return; }
-  if (message.type === 'state' && ws.bufferedAmount > 128 * 1024) return;
-  ws.send(JSON.stringify(message), () => {});
+  if (ws.peer) ws.peer.maxBufferedBytes = Math.max(ws.peer.maxBufferedBytes, ws.bufferedAmount);
+  if (ws.bufferedAmount > 1024 * 1024) { if (ws.peer) ws.peer.closeReason = 'send_backpressure'; ws.terminate(); return; }
+  if (message.type === 'state' && ws.bufferedAmount > 128 * 1024) { if (ws.peer) ws.peer.skippedStates++; return; }
+  const payload = JSON.stringify(message.type === 'state' && ws.peer?.frames ? ws.peer.frames.encode(message) : message);
+  if (ws.peer) { ws.peer.bytesSent += Buffer.byteLength(payload); ws.peer.messagesSent++; }
+  ws.send(payload, () => {});
 }
 async function jsonBody(req, limit = 8192) {
   let size = 0; const chunks = [];
@@ -40,8 +45,8 @@ async function jsonBody(req, limit = 8192) {
 
 export async function startBackend({ config, store, engine = new Engine(), logger = console }) {
   const rooms = new Map(), reservations = new Map(), pendingSaves = new Map(), pendingProgress = new Map(), limits = new Map();
-  let shuttingDown = false, retrying = false;
-  const log = event => logger.error(JSON.stringify({ event })); // Deliberately excludes URIs and tokens.
+  let shuttingDown = false, retrying = false, engineTiming = null;
+  const log = (event, fields = {}) => logger.error(JSON.stringify({ event, ...fields })); // Deliberately excludes URIs and tokens.
   function rate(key, max, windowMs) {
     const now = Date.now(); let entry = limits.get(key);
     if (!entry || now >= entry.until) { if (limits.size > 10000) throw new Problem('server_busy', 503); entry = { count: 0, until: now + windowMs }; limits.set(key, entry); }
@@ -68,11 +73,15 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     };
   }
   function checkpointOf(member) {
+    if (member?.checkpointProgress === member?.progress && member?.checkpointWave != null) return member.checkpointWave;
+    let wave = 0;
     try {
       const raw = JSON.parse(member?.progress?.document?.values?.champions_v1 ?? '{}');
       const value = raw.champions?.[member.skin]?.dungeonCheckpoint?.wave;
-      return Number.isSafeInteger(value) && value > 0 && value % 25 === 0 ? value : 0;
-    } catch { return 0; }
+      wave = Number.isSafeInteger(value) && value > 0 && value % 25 === 0 ? value : 0;
+    } catch {}
+    if (member) { member.checkpointProgress = member.progress; member.checkpointWave = wave; }
+    return wave;
   }
   function publishLobby(room) {
     for (const [id, state] of room.last) send(room.members.get(id)?.socket, decorate(room, state));
@@ -145,6 +154,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
       pendingProgress.set(event.id, { room, event }); void savePending();
     }
   });
+  engine.on('metrics', value => { const { tickMeanMs, tickP95Ms, tickMaxMs, callbackMaxMs, roomCount } = value; engineTiming = { tickMeanMs, tickP95Ms, tickMaxMs, callbackMaxMs, roomCount }; });
   engine.on('engineError', ({ code }) => { const room = rooms.get(code); if (room) void closeRoom(room, 'Game engine stopped. Rejoin a new room.'); });
   engine.on('lost', () => { if (!shuttingDown) { log('engine_stopped'); for (const room of rooms.values()) void closeRoom(room, 'Game engine stopped. Start a new room.'); } });
 
@@ -156,6 +166,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     let room = code ? rooms.get(code) : null;
     if (code && !room) throw new Problem('room_not_found');
     const mode = message.mode ?? 'coop';
+    peer.frames = message.stateProtocol === 1 ? new StateFrames() : null;
     if (!['coop', 'pvp'].includes(mode)) throw new Problem('invalid_mode');
     if (room && room.mode !== mode) throw new Problem('room_mode_mismatch');
     if (!Number.isInteger(message.skin ?? 0) || message.skin < 0 || message.skin > 3) throw new Problem('invalid_champion');
@@ -193,6 +204,10 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     if (m.type === 'join') return join(peer, m);
     const room = peer.room, member = peer.member;
     if (!room || !member || room.closing || member.socket !== peer.socket) throw new Problem('not_joined');
+    if (m.type === 'resync' && peer.frames) {
+      if (Date.now() - (peer.lastResync ?? 0) < 1000) return;
+      peer.lastResync = Date.now(); peer.frames = new StateFrames(); publishLobby(room); return;
+    }
     if (m.type === 'leave') return closeRoom(room, room.mode === 'pvp' ? 'Opponent left the duel. Remaining player wins.' : 'A teammate left the room.', member.player.id);
     if (m.type === 'start' || m.type === 'ready') {
       if (m.type === 'ready' && typeof m.ready !== 'boolean') throw new Problem('invalid_message');
@@ -236,7 +251,12 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     member.expiry.unref();
   }
 
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDeflate: false });
+  // Bound zlib work/memory; negotiate compression with native clients, including build 20.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4096,
+    perMessageDeflate: { threshold: 1024, serverNoContextTakeover: true,
+      clientNoContextTakeover: true, concurrencyLimit: 4,
+      zlibDeflateOptions: { level: 1, memLevel: 7 } } });
+  const loopDelay = monitorEventLoopDelay({ resolution: 20 }); loopDelay.enable();
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
     const reply = (status, body) => { res.writeHead(status); res.end(JSON.stringify(body)); };
@@ -248,7 +268,10 @@ export async function startBackend({ config, store, engine = new Engine(), logge
       if (req.method === 'OPTIONS') return reply(204, {});
       rate(`http:${req.socket.remoteAddress}`, 120, 60000);
       const path = new URL(req.url, 'http://localhost').pathname;
-      if (path === '/health' || path === '/healthz') return reply(200, { ok: true, service: 'nfinit-coop', rooms: rooms.size, maxPlayers: 2, ...protocol });
+      if (path === '/health' || path === '/healthz') return reply(200, { ok: true, service: 'nfinit-coop', rooms: rooms.size, maxPlayers: 2, ...protocol,
+        runtime: { eventLoopDelayP95Ms: Math.round(loopDelay.percentile(95) / 1e6),
+          enginePendingCommands: engine.pending?.size ?? 0,
+          connectedPlayers: wss.clients.size, simulation: engineTiming } });
       if (path === '/readyz') { if (!engine.ready || shuttingDown) throw new Problem('not_ready', 503); await store.ping(); return reply(200, { ok: true, ...protocol }); }
       if (path === '/api/session' && req.method === 'POST') {
         rate(`guest:${req.socket.remoteAddress}`, 10, 60000);
@@ -277,14 +300,18 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
   wss.on('connection', (socket, req) => {
-    const peer = { socket, ip: req.socket.remoteAddress, queue: Promise.resolve(), count: 0, window: Date.now(), alive: true };
+    const peer = { socket, ip: req.socket.remoteAddress, queue: Promise.resolve(), count: 0, window: Date.now(), alive: true, bytesSent: 0, messagesSent: 0, skippedStates: 0, maxBufferedBytes: 0 };
     peer.joinTimeout = setTimeout(() => { if (!peer.member) socket.close(1008, 'Join timeout'); }, 10000);
     socket.on('pong', () => { peer.alive = true; }); socket.peer = peer;
     socket.on('error', () => {});
-    socket.on('close', () => disconnected(peer));
+    socket.on('close', (code) => {
+      log('socket_closed', { code, bufferedBytes: socket.bufferedAmount, bytesSent: peer.bytesSent, messagesSent: peer.messagesSent, skippedStates: peer.skippedStates, maxBufferedBytes: peer.maxBufferedBytes, reason: peer.closeReason ?? 'transport_closed' });
+      disconnected(peer);
+    });
     socket.on('message', (raw, binary) => {
+      peer.alive = true; // Real incoming input proves life even if a mobile pong is delayed.
       if (Date.now() - peer.window >= 1000) { peer.window = Date.now(); peer.count = 0; }
-      if (binary || ++peer.count > 140) { socket.close(1008, 'Message limit exceeded'); return; }
+      if (binary || ++peer.count > 140) { peer.closeReason = 'input_rate_limit'; socket.close(1008, 'Message limit exceeded'); return; }
       let value;
       try { value = JSON.parse(raw.toString()); } catch { send(socket, { type: 'error', code: 'invalid_json', message: 'Invalid game message.' }); return; }
       peer.queue = peer.queue.then(() => handle(peer, value)).catch(error => send(socket, {
@@ -293,15 +320,15 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     });
   });
   const heartbeat = setInterval(() => {
-    for (const ws of wss.clients) { if (!ws.peer.alive) ws.terminate(); else { ws.peer.alive = false; ws.ping(); } }
+    for (const ws of wss.clients) { if (!ws.peer.alive) { ws.peer.closeReason = 'heartbeat_timeout'; ws.terminate(); } else { ws.peer.alive = false; ws.ping(); } }
     for (const [key, entry] of limits) if (Date.now() >= entry.until) limits.delete(key);
   }, 20000); heartbeat.unref();
   const retry = setInterval(() => void savePending(), 2000); retry.unref();
   try { await store.open(); await engine.open(config.engineBin); await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); }); }
-  catch (error) { clearInterval(heartbeat); clearInterval(retry); await engine.close(); await store.close(); throw error; }
+  catch (error) { loopDelay.disable(); clearInterval(heartbeat); clearInterval(retry); await engine.close(); await store.close(); throw error; }
   return { server, rooms, engine, pendingSaves, pendingProgress, port: server.address().port,
     async close() {
-      shuttingDown = true; clearInterval(heartbeat); clearInterval(retry);
+      shuttingDown = true; loopDelay.disable(); clearInterval(heartbeat); clearInterval(retry);
       await Promise.all([...rooms.values()].map(room => closeRoom(room, 'Server restarting.')));
       for (let i = 0; i < 10 && (pendingSaves.size || pendingProgress.size || retrying); i++) { await savePending(); if (pendingSaves.size || pendingProgress.size || retrying) await new Promise(r => setTimeout(r, 200)); }
       if (pendingSaves.size) log('unsaved_results_at_shutdown');

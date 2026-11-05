@@ -37,8 +37,8 @@ curl http://localhost:8081/readyz
 
 `healthz` verifică procesul HTTP; `readyz` verifică MongoDB și motorul de joc.
 
-Versiunea **1.2.0** folosește **coopProtocol 2** și **pvpProtocol 1**. După rebuild/redeploy din `main`,
-`/healthz` și `/readyz` trebuie să includă `backendVersion: "1.2.0"`,
+Versiunea **1.3.0** folosește **coopProtocol 2** și **pvpProtocol 1**. După rebuild/redeploy din `main`,
+`/healthz` și `/readyz` trebuie să includă `backendVersion: "1.3.0"`,
 `coopProtocol: 2` și capabilitățile `shared-checkpoint`, `both-players-ready`,
 `shared-champion-progress`, `pvp-1v1`, `hidden-target-immunity`. Un simplu `ok: true` fără aceste câmpuri indică
 backendul vechi. Uploadul aplicației în TestFlight nu actualizează serverul.
@@ -144,6 +144,58 @@ Mesajele `join` pentru ambii participanți trebuie să includă `"mode":"pvp"`.
 Dacă `mode` lipsește, serverul păstrează Co-op pentru clienții vechi.
 Clientul nou refuză un server fără `pvpRulesVersion: 1`, în loc să pornească
 accidental o partidă Co-op. Rebuild/redeploy al backendului este necesar.
+
+## Performanță și diagnostic (1.3.0)
+
+Simularea rămâne la 20 Hz. Indexul spațial verifică numai obstacolele apropiate,
+cu aceeași geometrie exactă de coliziune. Traseele statice reutilizează un cache
+limitat la 256 de intrări; traseele cu costuri dinamice de pericol se recalculează.
+Damage-ul monștrilor se memorează până la schimbarea parametrilor săi. Camerele
+inactive sau pe pauză trimit starea periodic la 1 Hz; comenzile de lobby și
+reconectare primesc imediat o stare nouă.
+
+Compresia WebSocket `permessage-deflate` se negociază și cu buildul mobil 20,
+cu nivel zlib 1, fără reutilizarea contextului și cu maximum 4 operații concurente.
+Clienții fără extensie continuă să primească JSON simplu. Compresia are cost CPU,
+de aceea se aplică numai mesajelor de cel puțin 1 KiB și a fost măsurată separat.
+
+Clienții noi includ `"stateProtocol":1` în `join`. Aceștia primesc `stateFrame`:
+un cadru complet inițial, apoi modificările câmpurilor, actorii vizibili și un
+dicționar de chei. Pozițiile de prezentare au maximum 5 zecimale; HP/XP/esența
+exacte rămân intacte. Timer-ele efectelor vizuale expirate sunt stabilizate.
+Serverul rămâne autoritar și nu rotunjește simularea sau recompensele.
+
+Fiecare socket are propria bază de comparație. Cadrele omise din cauza unei
+conexiuni lente nu avansează baza; jucătorii ascunși/despawnați sunt eliminați și
+din cache. Reconnect/mapă nouă/revanșă trimit o stare completă.
+`{"type":"resync"}` cere o bază nouă, maximum o dată pe secundă. Clienții vechi
+primesc în continuare `state`; pot coexista cu cei noi în aceeași cameră.
+Aplicația nouă limitează actualizările joystickului la aproximativ 30 Hz,
+comasează intrările intermediare și trimite imediat oprirea/direcția pentru dash.
+
+`GET /healthz` include `runtime`: întârzierea buclei Node, comenzile în așteptare,
+numărul conexiunilor și `simulation` (disponibil după primele 10 secunde).
+Motorul raportează media/p95/maximul duratei întregului lot de camere și
+intervalul maxim între callbackuri. Bugetul simulării este 50 ms pe lot,
+nu 50 ms pentru fiecare cameră. `MAX_ROOMS` este limita de admitere, nu o garanție
+de capacitate pentru orice număr de monștri sau orice VPS.
+
+Logul `socket_closed` include codul și motivul local (`heartbeat_timeout`,
+`input_rate_limit`, `send_backpressure` sau `transport_closed`), cadrele omise și
+bufferul maxim. `bytesSent` măsoară JSON-ul dinainte de compresie, nu traficul TLS.
+Nu înregistrează tokenuri, URI-uri MongoDB sau documente de progres.
+Un heartbeat consideră și mesajele primite ca dovadă de conexiune activă.
+
+După redeploy verificați `backendVersion: "1.3.0"`, `stateProtocol: 1` și
+capabilitățile `delta-state-frames`, `websocket-compression` în `/healthz`.
+Buildul 20 beneficiază de optimizările motorului și compresie după redeploy.
+Pentru cadrele delta și limitarea joystickului este necesar și un build nou al
+aplicației; acestea nu se activează prin simpla actualizare a serverului.
+
+Benchmarkurile sintetice sunt locale și nu demonstrează FPS-ul pe telefoane sau
+încărcarea VPS-ului. Scriptul `scripts/benchmark-transport.js` compară aceleași
+stări JSONL cu forma delta și compresia. Testele verifică atât clienți vechi/noi,
+cât și coexistența, cadrele omise, revanșa și reconectarea.
 
 ## MongoDB Atlas și progres
 

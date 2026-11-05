@@ -42,6 +42,7 @@ part 'monster_skills_engine.dart';
 part 'tech_monster_skills_engine.dart';
 part 'cooperative_engine.dart';
 part 'pvp_engine.dart';
+part 'arena_collision.dart';
 
 enum MatchMode { infection, survival, pvp }
 
@@ -207,14 +208,31 @@ class Player {
   int spawnWave = 1;
   int? campaignThreatDepth;
   int get threatDepth => campaignThreatDepth ?? spawnWave;
-  GameInt contactDamage({bool charging = false}) =>
-      ChampionHealthRules.incoming(
-        kind: monster ?? MonsterKind.blind,
+  (MonsterKind, int, bool, double)? _contactKey;
+  GameInt _normalDamage = GameInt.zero, _chargingDamage = GameInt.zero;
+  GameInt contactDamage({bool charging = false}) {
+    final kind = monster ?? MonsterKind.blind;
+    final variant = contentMonster?.damage ?? 1.0;
+    final key = (kind, threatDepth, elite, variant);
+    if (key != _contactKey) {
+      _contactKey = key;
+      _normalDamage = ChampionHealthRules.incoming(
+        kind: kind,
         depth: threatDepth,
         elite: elite,
-        charging: charging,
-        variantDamage: contentMonster?.damage ?? 1,
+        variantDamage: variant,
       );
+      _chargingDamage = ChampionHealthRules.incoming(
+        kind: kind,
+        depth: threatDepth,
+        elite: elite,
+        variantDamage: variant,
+        charging: true,
+      );
+    }
+    return charging ? _chargingDamage : _normalDamage;
+  }
+
   bool elite = false;
   final healthTrail = MonsterDamageTrail();
   double hitAt = -100;
@@ -1837,8 +1855,20 @@ class Room {
     }
   }
 
-  bool valid(double x, double y) =>
-      arenaPositionValid(x, y, walls, map.props, widthUnits: map.widthUnits);
+  ArenaMap? _collisionMap;
+  _CollisionGrid? _collisionGrid;
+  bool valid(double x, double y) {
+    final geometry = map;
+    if (!(x > .04 && x < geometry.widthUnits - .04 && y > .04 && y < .96)) {
+      return false;
+    }
+    if (!identical(_collisionMap, geometry)) {
+      _collisionMap = geometry;
+      _collisionGrid = _CollisionGrid(geometry);
+    }
+    return _collisionGrid!.valid(x, y, geometry);
+  }
+
   Set<int> shadowZonesAt(double x, double y) {
     final zones = <int>{};
     if (x <= boundaryShadowWidth) zones.add(-1);
@@ -2652,10 +2682,11 @@ class Room {
       final searchPhase = max(0, packIndex) * 2.39996;
       // Bots use the same open-ground and shared-cover visibility as humans.
       final seen =
-          visibleTo(p)
+          players
               .where(
                 (q) =>
                     !q.hunter &&
+                    canSeeRunner(p, q) &&
                     (p.monster != MonsterKind.warden || distance(p, q) < .22),
               )
               .toList()

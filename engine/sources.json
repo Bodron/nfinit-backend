@@ -7,6 +7,10 @@
       "sha256": "1d7ef2c69bee97b1a022df3a8da76964c7d6b7a1001fbfc8955d998c6fd1a44e"
     },
     {
+      "path": "game/arena_collision.dart",
+      "sha256": "ac1c2899a4be5d757d90426a7363d17bfe1a43c8b89a5b2d8d3263080075be02"
+    },
+    {
       "path": "game/arena_ids.dart",
       "sha256": "b9bc4f810785a1b3e29dc7ae2f0f722aaaed9aa1b99aad30a0bc921d1e355f8e"
     },
@@ -68,7 +72,7 @@
     },
     {
       "path": "game/engine.dart",
-      "sha256": "870e806c06acb0f0537fff8c9d188ff342af8ee28a915fb1b1b1519dcb183cac"
+      "sha256": "429f8fab26c3e7729681e1df970f5f71e5c20f175dff7d760da29a8b8914def5"
     },
     {
       "path": "game/game_int.dart",
@@ -112,7 +116,7 @@
     },
     {
       "path": "game/navigation.dart",
-      "sha256": "95a3f2aafd4708a530bd89e52d2b2e9ab8f01135105e2fb6a43647d98a745f1a"
+      "sha256": "a3d049a15e637d9668222811e2b3a1f2b1a14bd542dcfff05564ab32acc3f8dd"
     },
     {
       "path": "game/nyx_eclipse_motion.dart",

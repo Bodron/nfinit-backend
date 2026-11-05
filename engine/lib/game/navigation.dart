@@ -16,6 +16,8 @@ class NavigationGrid {
   final int columns;
   late final List<bool> walk;
   late final List<int> covers;
+  final _routes = <(int, int), List<int>>{};
+  int routeSearches = 0;
   double x(int c) => (c % columns + .5) / n;
   double y(int c) => (c ~/ columns + .5) / n;
   Iterable<int> neighbors(int c) sync* {
@@ -76,15 +78,26 @@ class NavigationGrid {
     double? threatY,
     double Function(double, double)? traversalPenalty,
   }) {
-    final start = nearest(px, py),
-        goal = nearest(tx, ty),
-        parent = List<int>.filled(columns * n, -1),
+    final start = nearest(px, py), goal = nearest(tx, ty);
+    final cacheable =
+        threatX == null && threatY == null && traversalPenalty == null;
+    final key = (start, goal);
+    final cached = cacheable ? _routes[key] : null;
+    if (cached != null) return cached;
+    final parent = List<int>.filled(columns * n, -1),
         cost = List<double>.filled(columns * n, double.infinity),
         open = _Heap();
     double heuristic(int c) =>
         ((c % columns - goal % columns).abs() +
                 (c ~/ columns - goal ~/ columns).abs())
             .toDouble();
+    routeSearches++;
+    List<int> finish(List<int> result) {
+      if (!cacheable) return result;
+      if (_routes.length >= 256) _routes.remove(_routes.keys.first);
+      return _routes[key] = List<int>.unmodifiable(result);
+    }
+
     cost[start] = 0;
     open.add(start, heuristic(start));
     while (open.isNotEmpty) {
@@ -109,12 +122,12 @@ class NavigationGrid {
         }
       }
     }
-    if (goal != start && parent[goal] < 0) return [];
+    if (goal != start && parent[goal] < 0) return finish([]);
     final path = <int>[goal];
     while (path.last != start) {
       path.add(parent[path.last]);
     }
-    return path.reversed.toList();
+    return finish(path.reversed.toList());
   }
 }
 
