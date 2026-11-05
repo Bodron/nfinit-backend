@@ -91,6 +91,20 @@ test('Real MongoDB transactions persist profiles and apply a match exactly once'
       }
       await online.saveCoopProgress(event, apply);
       assert.deepEqual(await Promise.all(progressPlayers.map(p => online.getProgress(p.id))), afterProgress);
+      const duelId = 'pvp-transaction';
+      await online.beginMatch(duelId, 'DUELS', progressPlayers, 'pvp');
+      const pvpResult = { id: duelId, mode: 'pvp', winnerId: a.player.id,
+        players: progressPlayers.map(p => ({ ...p, kills: 1, weaponXp: '999', essence: '999' })) };
+      const oldStats = await Promise.all(progressPlayers.map(p => online.getPlayer(p.id)));
+      await Promise.all([online.finishMatch(pvpResult), online.finishMatch(pvpResult)]);
+      for (const [i, player] of progressPlayers.entries()) {
+        const stats = (await online.getPlayer(player.id)).stats;
+        assert.equal(stats.pvpMatches, 1); assert.equal(stats.pvpWins, i === 0 ? 1 : 0);
+        for (const key of ['matches', 'weaponXp', 'essence', 'bestWave', 'kills']) assert.equal(stats[key], oldStats[i].stats[key]);
+      }
+      assert.deepEqual(await Promise.all(progressPlayers.map(p => online.getProgress(p.id))), afterProgress);
+      await assert.rejects(online.saveCoopProgress({ ...event, id: duelId }, apply));
+
     } finally { host?.ws.terminate(); friend?.ws.terminate(); await app.close(); }
   } finally { await store.close(); await mongo.stop(); }
 });

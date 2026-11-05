@@ -41,8 +41,9 @@ part 'champion_abilities_engine.dart';
 part 'monster_skills_engine.dart';
 part 'tech_monster_skills_engine.dart';
 part 'cooperative_engine.dart';
+part 'pvp_engine.dart';
 
-enum MatchMode { infection, survival }
+enum MatchMode { infection, survival, pvp }
 
 final rng = Random();
 
@@ -333,6 +334,7 @@ class Room {
       campaign?.waves[wave - 1].seconds ?? SurvivalRules.seconds(wave);
   bool get campaignWon => campaign != null && ended && winner == 'runners';
   bool get survival => mode == MatchMode.survival;
+  bool get pvp => mode == MatchMode.pvp;
   int wave = 1, completedWaves = 0, round = 0;
   double intermission = 0;
   GameInt get survivalPoints => campaign != null
@@ -571,7 +573,7 @@ class Room {
       survival &&
       campaign == null &&
       players.any((p) => p.hunter && p.elite && p.spawnWave == wave);
-  bool get combat => survival;
+  bool get combat => survival || pvp;
   final projectiles = <CombatProjectile>[];
   int _shotSerial = 0;
   final combatFeedback = CombatFeedback();
@@ -841,17 +843,18 @@ class Room {
         paused ||
         intermission > 0 ||
         p.hunter ||
-        (cooperative && p.health <= 0) ||
+        ((cooperative || pvp) && p.health <= 0) ||
         p.isBot ||
         !players.contains(p) ||
-        p.fireCooldown > 0) {
+        p.fireCooldown > 0 ||
+        (pvp && hidden(p))) {
       return false;
     }
     final candidates =
         players
             .where(
               (enemy) =>
-                  enemy.hunter &&
+                  _canAutoTarget(p, enemy) &&
                   enemy.health > 0 &&
                   enemy.entryLeft <= 0 &&
                   distance(p, enemy) <= CombatRules.attackRange &&
@@ -1078,7 +1081,7 @@ class Room {
       return;
     }
     bool eligible(Player p) =>
-        p.hunter &&
+        _canAutoTarget(shot.owner, p) &&
         p.health > 0 &&
         p.entryLeft <= 0 &&
         !shot.hits.contains(p.id) &&
@@ -1128,10 +1131,26 @@ class Room {
     GameInt damage,
     Set<Player> dead,
   ) {
-    if (dead.contains(target) || target.health <= 0) return;
+    if (dead.contains(target) ||
+        target.health <= 0 ||
+        (pvp &&
+            (!running ||
+                !_canProjectileHit(shot, target) ||
+                target.tagLock > 0 ||
+                target.hurtLeft > 0))) {
+      return;
+    }
     final before = target.health;
     target.healthTrail.hit(before / target.maxHealth, elapsed);
-    final effectiveDamage = target.stunLeft > 0 ? damage * 1.5 : damage;
+    var effectiveDamage = target.stunLeft > 0 ? damage * 1.5 : damage;
+    if (pvp) {
+      effectiveDamage = _absorbMinorShield(
+        target,
+        _protectedContactDamage(target, effectiveDamage),
+      );
+      target.damageSerial++;
+      target.hurtAt = elapsed;
+    }
     target.health = (before - effectiveDamage).max(0);
     final appliedDamage = before - target.health;
     target.lastDamage = appliedDamage;
@@ -1165,6 +1184,13 @@ class Room {
     }
     if (target.health <= 0) {
       dead.add(target);
+      if (pvp) {
+        shot.owner.kills++;
+        target.setMovement(0, 0);
+        winner = shot.owner.id;
+        endRound('${shot.owner.name} wins the duel!');
+        return;
+      }
       monsterRemains.add(
         MonsterRemains(
           target.x,
@@ -1196,7 +1222,7 @@ class Room {
     final result = players
         .where(
           (p) =>
-              p.hunter &&
+              _canAutoTarget(shot.owner, p) &&
               p.entryLeft <= 0 &&
               p.health > 0 &&
               !dead.contains(p) &&
@@ -1267,6 +1293,9 @@ class Room {
       (e) => elapsed - (e['time'] as double) > .4,
     );
     for (final p in players.where((p) => !p.hunter && !p.isBot)) {
+      if (pvp && players.any((q) => q.id == p.combatTargetId && hidden(q))) {
+        p.combatTargetId = null;
+      }
       p.fireCooldown = max(0, p.fireCooldown - delta);
       tryShoot(p);
     }
@@ -1291,7 +1320,7 @@ class Room {
           break;
         }
         for (final target in players.where(
-          (p) => p.hunter && p.entryLeft <= 0,
+          (p) => _canProjectileHit(shot, p) && p.entryLeft <= 0,
         )) {
           if (dead.contains(target) ||
               shot.hits.contains(target.id) ||
@@ -1341,6 +1370,7 @@ class Room {
     }
     projectiles.removeWhere((s) => s.life <= 0);
     for (final target in dead) {
+      if (pvp) continue;
       players.remove(target);
       _lures.remove(target.id);
       _heardHistory.remove(target.id);
@@ -1379,9 +1409,10 @@ class Room {
           0,
           0,
           volley: -1000000 - cast.serial,
+          manuallyTargeted: cast.manuallyTargeted,
         );
         for (final target in players.where(
-          (p) => p.hunter && p.entryLeft <= 0,
+          (p) => _canProjectileHit(shot, p) && p.entryLeft <= 0,
         )) {
           if (dead.contains(target) ||
               target.health <= 0 ||
@@ -1420,7 +1451,12 @@ class Room {
             segment(field.x, field.y, p.x, p.y);
         if (owner.skin == 2) {
           for (final ally in players.where(
-            (p) => !p.hunter && !p.isBot && p.health > 0 && inside(p),
+            (p) =>
+                !p.hunter &&
+                !p.isBot &&
+                p.health > 0 &&
+                (!pvp || identical(p, owner)) &&
+                inside(p),
           )) {
             final healing = (ally.maxHealth * 6 + 99) ~/ 100;
             ally.health = (ally.health + healing).min(ally.maxHealth);
@@ -1434,13 +1470,14 @@ class Room {
           0,
           0,
           volley: -2000000 - owner.powerSerial,
+          manuallyTargeted: field.manuallyTargeted,
         );
         final damage = owner.skin == 2
             ? ((field.damage + 1) ~/ 2).max(1)
             : field.damage;
         for (final enemy in players.where(
           (p) =>
-              p.hunter &&
+              _canProjectileHit(shot, p) &&
               p.entryLeft <= 0 &&
               !dead.contains(p) &&
               p.health > 0 &&
@@ -1473,7 +1510,9 @@ class Room {
   final String code;
   final bool demo;
   ChampionLoadout loadoutFor(Player p) =>
-      (demo || cooperative) && !p.isBot ? p.upgrades : ChampionLoadout.base;
+      !pvp && (demo || cooperative) && !p.isBot
+      ? p.upgrades
+      : ChampionLoadout.base;
   final players = <Player>[];
   int _momentSerial = 0;
   final _lures = <String, _Lure>{};
@@ -1655,9 +1694,13 @@ class Room {
     _finaleEvent = 0;
     for (var i = 0; i < players.length; i++) {
       final p = players[i];
-      p.hunter = survival ? (cooperative ? p.isBot : i > 0) : i == 0;
+      p.hunter = pvp
+          ? false
+          : survival
+          ? (cooperative ? p.isBot : i > 0)
+          : i == 0;
       p.cooldown = 0;
-      p.tagLock = cooperative && !p.isBot
+      p.tagLock = (cooperative || pvp) && !p.isBot
           ? 3
           : i == 0
           ? 3
@@ -1743,6 +1786,24 @@ class Room {
         p.x = map.spawn[0] + .035 * i;
         p.y = map.spawn[1];
       }
+      if (pvp) {
+        final desired = i == 0 ? (.18, .18) : (.82, .82);
+        final candidates =
+            [
+              desired,
+              for (var y = 2; y <= 8; y++)
+                for (var x = 2; x <= 8; x++) (x / 10, y / 10),
+            ].where((point) => valid(point.$1, point.$2)).toList()..sort(
+              (a, b) => (pow(a.$1 - desired.$1, 2) + pow(a.$2 - desired.$2, 2))
+                  .compareTo(
+                    pow(b.$1 - desired.$1, 2) + pow(b.$2 - desired.$2, 2),
+                  ),
+            );
+        if (candidates.isNotEmpty) {
+          p.x = candidates.first.$1;
+          p.y = candidates.first.$2;
+        }
+      }
       if (!valid(p.x, p.y)) {
         p.x = map.spawn[0];
         p.y = map.spawn[1];
@@ -1768,6 +1829,8 @@ class Room {
           );
         }
       }
+    } else if (pvp) {
+      message = 'Duel 1v1. Hidden champions cannot be auto-targeted; aimed skills can hit them.';
     } else {
       message =
           'Survive until the end! Every captured runner becomes a seeker.';
@@ -1835,7 +1898,7 @@ class Room {
   }
 
   bool sideHidden(Player p) =>
-      survival && !p.hunter && p.cover.hidden(coverSideAt(p), elapsed);
+      (survival || pvp) && !p.hunter && p.cover.hidden(coverSideAt(p), elapsed);
 
   bool inShadow(double x, double y) => shadowZonesAt(x, y).isNotEmpty;
 
@@ -1863,12 +1926,14 @@ class Room {
               clearPath(viewer, runner));
 
   bool hidden(Player p) =>
-      !p.hunter && (survival ? sideHidden(p) : inShadow(p.x, p.y));
+      !p.hunter && ((survival || pvp) ? sideHidden(p) : inShadow(p.x, p.y));
   bool clearPath(Player a, Player b) => List.generate(
     16,
     (i) => valid(a.x + (b.x - a.x) * i / 15, a.y + (b.y - a.y) * i / 15),
   ).every((v) => v);
-  List<Player> visibleTo(Player viewer) => viewer.hunter
+  List<Player> visibleTo(Player viewer) => pvp
+      ? players.where((p) => identical(p, viewer) || !hidden(p)).toList()
+      : viewer.hunter
       ? players.where((p) => p.hunter || canSeeRunner(viewer, p)).toList()
       : players.where((p) => identical(p, viewer) || !p.cloaked).toList();
 
@@ -2020,6 +2085,7 @@ class Room {
     if (player.skin == 1) damage = (damage * 80 + 99) ~/ 100;
     final protected = players.any(
       (tank) =>
+          (!pvp || identical(tank, player)) &&
           tank.skin == 1 &&
           tank.combatPowers &&
           !tank.hunter &&
@@ -2138,7 +2204,7 @@ class Room {
   }
 
   void action(Player p, String a, {double? targetX, double? targetY}) {
-    if (cooperative && p.health <= 0) return;
+    if ((cooperative || pvp) && p.health <= 0) return;
     if (a.startsWith('upgrade:')) {
       upgradeWeapon(p, a.substring(8));
       return;
@@ -2222,7 +2288,7 @@ class Room {
   }
 
   bool tryPower(Player p, {double? targetX, double? targetY}) {
-    if (cooperative && p.health <= 0) return false;
+    if ((cooperative || pvp) && p.health <= 0) return false;
     if (!running ||
         paused ||
         intermission > 0 ||
@@ -2345,7 +2411,7 @@ class Room {
             players
                 .where(
                   (q) =>
-                      q.hunter &&
+                      _canAutoTarget(p, q) &&
                       q.entryLeft <= 0 &&
                       distance(p, q) <= ChampionField.castRange &&
                       clearPath(p, q),
@@ -2365,7 +2431,17 @@ class Room {
         hasteUpgrades: p.hasteUpgrades,
         volleyUpgrades: p.volleyUpgrades,
       );
-      championFields.add(ChampionField(p, elapsed, x, y, p.powerLeft, damage));
+      championFields.add(
+        ChampionField(
+          p,
+          elapsed,
+          x,
+          y,
+          p.powerLeft,
+          damage,
+          manuallyTargeted: targeted,
+        ),
+      );
     } else if (p.skin == 2 || p.skin == 3) {
       // Tag mode has no health: support/control buys an escape window instead.
       for (final q in players) {
@@ -2900,7 +2976,11 @@ class Room {
   }
 
   void tick() {
-    if (running && !survival && players.isNotEmpty && runnerCount == 0) {
+    if (running &&
+        !survival &&
+        !pvp &&
+        players.isNotEmpty &&
+        runnerCount == 0) {
       winner = 'hunters';
       endRound('No runners remain. Seekers win!');
     }
@@ -2917,7 +2997,7 @@ class Room {
       final delta = min(dt, left);
       left = max(0, left - delta);
       soundClock += delta;
-      if (!survival && !players.any((p) => p.hunter)) {
+      if (!survival && !pvp && !players.any((p) => p.hunter)) {
         players.last.hunter = true;
         players.last.tagLock = 3;
       }
@@ -3056,7 +3136,7 @@ class Room {
             }
           }
           p.dashLeft = max(0, p.dashLeft - delta / substeps);
-          if (survival && !p.hunter) {
+          if ((survival || pvp) && !p.hunter) {
             p.cover.update(coverSideAt(p), elapsed);
             p.updateAmbush(
               sideHidden(p) || p.cloaked,
@@ -3117,8 +3197,11 @@ class Room {
           campaign != null ||
           !survival ||
           hunterCount < EndlessBalance.maxActiveMonsters;
-      if (running && (cleared || left <= 0 && hasWaveSlot)) {
-        if (survival) {
+      if (running &&
+          (pvp ? left <= 0 : (cleared || left <= 0 && hasWaveSlot))) {
+        if (pvp) {
+          _finishPvpTimer();
+        } else if (survival) {
           if (campaign == null) {
             completedWaves++;
             _advanceEndlessWave(cleared: cleared);
@@ -3156,7 +3239,7 @@ class Room {
       if (p.onMessage == null) continue;
       Map<String, dynamic> view(Player q) => {
         'id': q.id,
-        if (cooperative) 'downed': !q.isBot && q.health <= 0,
+        if (cooperative || pvp) 'downed': !q.isBot && q.health <= 0,
         'name': q.name,
         'skin': q.skin,
         'monster': q.monster?.name,
@@ -3244,15 +3327,19 @@ class Room {
         'combat': combat,
         'nyxEclipses': [
           for (final cast in eclipses)
-            {
-              'x': cast.x,
-              'y': cast.y,
-              'age': elapsed - cast.time,
-              'radius': NyxEclipseCast.radius,
-            },
+            if (!pvp ||
+                identical(cast.owner, p) ||
+                !hidden(cast.owner) ||
+                cast.manuallyTargeted)
+              {
+                'x': cast.x,
+                'y': cast.y,
+                'age': elapsed - cast.time,
+                'radius': NyxEclipseCast.radius,
+              },
         ],
-        'timedCover': survival,
-        'coverSides': survival ? p.cover.snapshot(elapsed) : const [],
+        'timedCover': survival || pvp,
+        'coverSides': (survival || pvp) ? p.cover.snapshot(elapsed) : const [],
         'coverActive': sideHidden(p),
         'coverRemaining': sideHidden(p) ? max(0, p.cover.until - elapsed) : 0,
         'kills': p.kills,
@@ -3352,12 +3439,23 @@ class Room {
             },
         ],
         'minorSkillEffects': [
-          for (final effect in minorSkillEffects) effect.snapshot(elapsed),
+          for (final effect in minorSkillEffects)
+            if (!pvp ||
+                identical(effect.owner, p) ||
+                !hidden(effect.owner) ||
+                effect.manuallyTargeted)
+              effect.snapshot(elapsed),
         ],
         'championFields': [
-          for (final field in championFields) field.snapshot(elapsed),
+          for (final field in championFields)
+            if (!pvp ||
+                identical(field.owner, p) ||
+                !hidden(field.owner) ||
+                field.manuallyTargeted)
+              field.snapshot(elapsed),
           for (final tank in players)
-            if (tank.skin == 1 &&
+            if ((!pvp || identical(tank, p) || !hidden(tank)) &&
+                tank.skin == 1 &&
                 tank.combatPowers &&
                 !tank.hunter &&
                 tank.health > 0 &&
@@ -3479,8 +3577,10 @@ class Room {
         'moment': p.moment?.toJson(),
         'code': code,
         'demo': demo,
-        if (cooperative) ...{
-          'coop': true,
+        if (cooperative || pvp) ...{
+          'coop': cooperative,
+          'pvp': pvp,
+          if (pvp) 'pvpRulesVersion': 1,
           'maxPlayers': 2,
           'humanCount': players.where((q) => !q.isBot).length,
           'party': [
@@ -3598,8 +3698,10 @@ class ChampionField {
     this.x,
     this.y,
     this.duration,
-    this.damage,
-  );
+    this.damage, {
+    this.manuallyTargeted = false,
+  });
+  final bool manuallyTargeted;
   static const bastionRadius = .18 / arenaScale;
   static const castRange = .32 / arenaScale;
   final Player owner;
@@ -3625,7 +3727,8 @@ class NyxEclipseCast {
     this.damage, {
     double? targetX,
     double? targetY,
-  }) : x = targetX ?? owner.x,
+  }) : manuallyTargeted = targetX != null && targetY != null,
+       x = targetX ?? owner.x,
        y = targetY ?? owner.y,
        serial = owner.powerSerial {
     final dx = x - owner.x, dy = y - owner.y;
@@ -3633,6 +3736,7 @@ class NyxEclipseCast {
     directionX = travel > .00001 ? dx / travel : owner.aimX;
     directionY = travel > .00001 ? dy / travel : owner.aimY;
   }
+  final bool manuallyTargeted;
   // Shared by damage, the cast perimeter and the aim preview.
   static const radius = .14 / arenaScale;
   static const castRange = EclipseTargeting.reach / arenaScale;
@@ -3678,9 +3782,10 @@ class CombatProjectile {
     this.ricochetsLeft = 0,
     this.minorCharged = false,
     this.minorSerial = 0,
+    this.manuallyTargeted = false,
   }) : damage = GameInt.parse(damage);
   final GameInt damage;
-  final bool minorCharged;
+  final bool minorCharged, manuallyTargeted;
   final int minorSerial;
   final int volley;
   final ShotPattern pattern;

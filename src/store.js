@@ -10,7 +10,11 @@ function guest(name) {
     stats: { matches: 0, kills: 0, bestWave: 0, weaponXp: '0', essence: '0' } } };
 }
 function rewards(profile, player, result) {
-  return { matches: profile.stats.matches + 1, kills: profile.stats.kills + player.kills,
+  if (result.mode === 'pvp') return { ...profile.stats,
+    pvpMatches: (profile.stats.pvpMatches ?? 0) + 1,
+    pvpWins: (profile.stats.pvpWins ?? 0) + (result.winnerId === player.id ? 1 : 0),
+    pvpDraws: (profile.stats.pvpDraws ?? 0) + (result.winnerId === 'draw' ? 1 : 0) };
+  return { ...profile.stats, matches: profile.stats.matches + 1, kills: profile.stats.kills + player.kills,
     bestWave: Math.max(profile.stats.bestWave, result.completedWaves > 0 ? (result.startWave || 1) + result.completedWaves - 1 : 0),
     weaponXp: (BigInt(profile.stats.weaponXp) + BigInt(player.weaponXp)).toString(),
     essence: (BigInt(profile.stats.essence) + BigInt(player.essence)).toString() };
@@ -65,15 +69,15 @@ export class MongoStore {
     return duplicate ? { accepted: true, revision: duplicate.revision }
       : { accepted: false, progress: publicProgress(current) };
   }
-  async beginMatch(id, code, players) {
-    await this.matches.insertOne({ _id: id, roomCode: code, players, status: 'running', startedAt: new Date() });
+  async beginMatch(id, code, players, mode = 'coop') {
+    await this.matches.insertOne({ _id: id, roomCode: code, players, mode, status: 'running', startedAt: new Date() });
   }
   async saveCoopProgress(event, apply) {
     const session = this.client.startSession();
     try {
       await session.withTransaction(async () => {
         const match = await this.matches.findOne({ _id: event.id }, { session });
-        if (!match || event.states.length !== 2 || new Set(event.states.map(p => p.id)).size !== 2 ||
+        if (!match || (match.mode ?? 'coop') !== 'coop' || event.states.length !== 2 || new Set(event.states.map(p => p.id)).size !== 2 ||
             !event.states.every(p => match.players.some(q => q.id === p.id && q.skin === p.state.self.skin))) throw new Error('Invalid progress participants');
         if ((match.progressSequence ?? 0) >= event.sequence) return;
         for (const player of event.states) {
@@ -96,6 +100,8 @@ export class MongoStore {
         const match = await this.matches.findOne({ _id: result.id }, { session });
         if (!match) throw new Error('Unknown match');
         if (match.status === 'finished') return;
+        if ((result.mode ?? 'coop') !== (match.mode ?? 'coop')) throw new Error('Invalid match mode');
+        if (result.mode === 'pvp' && !['draw', 'abandoned', ...match.players.map(p => p.id)].includes(result.winnerId)) throw new Error('Invalid duel winner');
         if (result.players.length !== 2 || new Set(result.players.map(p => p.id)).size !== 2 || !result.players.every(p => match.players.some(q => q.id === p.id))) throw new Error('Invalid result participants');
         for (const player of result.players) {
           const profile = await this.players.findOne({ _id: player.id }, { session });
@@ -131,10 +137,10 @@ export class MemoryStore {
       receipts: [...(row?.receipts ?? []), { id: mutationId, fingerprint, revision }].slice(-32) });
     return { accepted: true, revision };
   }
-  async beginMatch(id, code, players) { if (this.matches.has(id)) throw new Error('Duplicate match'); this.matches.set(id, { id, roomCode: code, players, status: 'running', startedAt: new Date() }); }
+  async beginMatch(id, code, players, mode = 'coop') { if (this.matches.has(id)) throw new Error('Duplicate match'); this.matches.set(id, { id, roomCode: code, players, mode, status: 'running', startedAt: new Date() }); }
   async saveCoopProgress(event, apply) {
     const match = this.matches.get(event.id);
-    if (!match || event.states.length !== 2 || new Set(event.states.map(p => p.id)).size !== 2 ||
+    if (!match || (match.mode ?? 'coop') !== 'coop' || event.states.length !== 2 || new Set(event.states.map(p => p.id)).size !== 2 ||
         !event.states.every(p => match.players.some(q => q.id === p.id && q.skin === p.state.self.skin))) throw new Error('Invalid progress participants');
     if ((match.progressSequence ?? 0) >= event.sequence) return;
     const updates = [];
@@ -149,6 +155,9 @@ export class MemoryStore {
   }
   async finishMatch(result) {
     const match = this.matches.get(result.id); if (!match) throw new Error('Unknown match'); if (match.status === 'finished') return;
+    if ((result.mode ?? 'coop') !== (match.mode ?? 'coop')) throw new Error('Invalid match mode');
+    if (result.mode === 'pvp' && !['draw', 'abandoned', ...match.players.map(p => p.id)].includes(result.winnerId)) throw new Error('Invalid duel winner');
+    if (result.players.length !== 2 || new Set(result.players.map(p => p.id)).size !== 2 || !result.players.every(p => match.players.some(q => q.id === p.id))) throw new Error('Invalid result participants');
     for (const player of result.players) { const p = this.players.get(player.id); p.stats = rewards(p, player, result); }
     Object.assign(match, { result, status: 'finished' });
   }

@@ -6,8 +6,8 @@ import { Engine } from './engine.js';
 import { validProgressWrite } from './progress.js';
 
 const { version: backendVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-const protocol = { backendVersion, coopProtocol: 2,
-  capabilities: ['shared-checkpoint', 'both-players-ready', 'shared-champion-progress'] };
+const protocol = { backendVersion, coopProtocol: 2, pvpProtocol: 1,
+  capabilities: ['shared-checkpoint', 'both-players-ready', 'shared-champion-progress', 'pvp-1v1', 'hidden-target-immunity'] };
 
 class Problem extends Error { constructor(code, status = 400) { super(code); this.code = code; this.status = status; } }
 const nameOf = value => typeof value === 'string' && value.trim() ? value.trim().slice(0, 16) : 'Player';
@@ -54,11 +54,13 @@ export async function startBackend({ config, store, engine = new Engine(), logge
   }
   function decorate(room, state) {
     const connected = [...room.members.values()].filter(m => m.socket?.readyState === WebSocket.OPEN).length;
-    return { ...state, coop: true, coopProtocol: protocol.coopProtocol, maxPlayers: 2, humanCount: room.members.size,
+    return { ...state, coop: room.mode !== 'pvp', pvp: room.mode === 'pvp',
+      ...(room.mode === 'pvp' ? { pvpRulesVersion: 1 } : {}),
+      coopProtocol: protocol.coopProtocol, maxPlayers: 2, humanCount: room.members.size,
       connectedPlayers: connected, reconnecting: connected < room.members.size,
       readyCount: [...room.members.values()].filter(m => m.ready).length,
       ready: room.members.get(state.id)?.ready === true, starting: room.busy,
-      coopStartWave: Math.min(...[...room.members.values()].map(m => checkpointOf(m) + 1)),
+      ...(room.mode !== 'pvp' ? { coopStartWave: Math.min(...[...room.members.values()].map(m => checkpointOf(m) + 1)) } : {}),
       matchId: room.matchId || null, rewardsSaved: room.matchId ? room.saved.has(room.matchId) : false,
       party: state.party?.map(p => ({ ...p, ready: room.members.get(p.id)?.ready === true,
         checkpointWave: checkpointOf(room.members.get(p.id)),
@@ -104,9 +106,10 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     if (!room.saved.has(result.id)) pendingSaves.set(result.id, { room, result });
     void savePending();
   }
-  function fallbackResult(room, reason) {
+  function fallbackResult(room, reason, forfeitId) {
     const states = [...room.last.values()];
-    return { id: room.matchId, roomCode: room.code, outcome: reason,
+    return { id: room.matchId, roomCode: room.code, outcome: reason, mode: room.mode,
+      ...(room.mode === 'pvp' ? { winnerId: states.find(s => s.ended)?.winner ?? (forfeitId ? [...room.members.keys()].find(id => id !== forfeitId) : 'abandoned') } : {}),
       wave: states[0]?.wave || 1, completedWaves: states[0]?.completedWaves || 0, startWave: states[0]?.startWave || 1,
       elapsed: states[0]?.elapsed || 0,
       players: [...room.members.values()].map(m => {
@@ -115,12 +118,13 @@ export async function startBackend({ config, store, engine = new Engine(), logge
           weaponXp: String(state?.weaponXpEarned || 0), essence: String(state?.lootEssenceEarned || 0) };
       }) };
   }
-  async function closeRoom(room, reason) {
+  async function closeRoom(room, reason, forfeitId) {
     if (room.closing) return; room.closing = true;
+    if (room.mode === 'pvp' && ![...room.members.values()].some(m => m.player.id !== forfeitId && m.socket?.readyState === WebSocket.OPEN)) forfeitId = undefined;
     if (engine.ready) {
-      try { await engine.command('finish', { code: room.code, reason }); } catch {}
+      try { await engine.command('finish', { code: room.code, reason, forfeitId }); } catch {}
     }
-    if (room.matchId && !room.saved.has(room.matchId) && !pendingSaves.has(room.matchId)) queueSave(room, fallbackResult(room, reason));
+    if (room.matchId && !room.saved.has(room.matchId) && !pendingSaves.has(room.matchId)) queueSave(room, fallbackResult(room, reason, forfeitId));
     rooms.delete(room.code);
     for (const member of room.members.values()) {
       clearTimeout(member.expiry); reservations.delete(member.player.id);
@@ -136,7 +140,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
   });
   engine.on('result', ({ code, result }) => { const room = rooms.get(code); if (room && result.id === room.matchId) { clearReady(room); queueSave(room, result); } });
   engine.on('progress', event => {
-    const room = rooms.get(event.code); if (!room || event.id !== room.matchId) return;
+    const room = rooms.get(event.code); if (!room || room.mode === 'pvp' || event.id !== room.matchId) return;
     if (event.sequence > (pendingProgress.get(event.id)?.event.sequence ?? 0)) {
       pendingProgress.set(event.id, { room, event }); void savePending();
     }
@@ -151,6 +155,9 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     if (code && !/^[A-Z2-9]{5}$/.test(code)) throw new Problem('room_not_found');
     let room = code ? rooms.get(code) : null;
     if (code && !room) throw new Problem('room_not_found');
+    const mode = message.mode ?? 'coop';
+    if (!['coop', 'pvp'].includes(mode)) throw new Problem('invalid_mode');
+    if (room && room.mode !== mode) throw new Problem('room_mode_mismatch');
     if (!Number.isInteger(message.skin ?? 0) || message.skin < 0 || message.skin > 3) throw new Problem('invalid_champion');
     let player, token;
     if (message.token) { player = await store.authenticate(message.token); if (!player) throw new Problem('invalid_token', 401); }
@@ -161,7 +168,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     if (reserved && reserved !== code) throw new Problem('already_in_room');
     if (!room) {
       if (rooms.size >= config.maxRooms) throw new Problem('server_full', 503);
-      room = { code: codeOf(), members: new Map(), last: new Map(), matchId: null, saved: new Set(), closing: false, busy: false };
+      room = { code: codeOf(), mode, members: new Map(), last: new Map(), matchId: null, saved: new Set(), closing: false, busy: false };
       rooms.set(room.code, room);
     }
     if (room.closing) throw new Problem('room_unavailable');
@@ -176,7 +183,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     clearTimeout(peer.joinTimeout);
     send(peer.socket, { type: 'identity', protocol: protocol.coopProtocol, playerId: player.id, ...(token ? { token } : {}) });
     try {
-      if (!reconnect) await engine.command('join', { code: room.code, playerId: player.id, name: player.name, skin: member.skin });
+      if (!reconnect) await engine.command('join', { code: room.code, playerId: player.id, name: player.name, skin: member.skin, mode: room.mode });
       const allHere = [...room.members.values()].every(m => m.socket?.readyState === WebSocket.OPEN);
       await engine.command('pause', { code: room.code, paused: !allHere });
     } catch { await closeRoom(room, 'Cannot open the game room. Please retry.'); throw new Problem('engine_unavailable', 503); }
@@ -186,7 +193,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     if (m.type === 'join') return join(peer, m);
     const room = peer.room, member = peer.member;
     if (!room || !member || room.closing || member.socket !== peer.socket) throw new Problem('not_joined');
-    if (m.type === 'leave') return closeRoom(room, 'A teammate left the room.');
+    if (m.type === 'leave') return closeRoom(room, room.mode === 'pvp' ? 'Opponent left the duel. Remaining player wins.' : 'A teammate left the room.', member.player.id);
     if (m.type === 'start' || m.type === 'ready') {
       if (m.type === 'ready' && typeof m.ready !== 'boolean') throw new Problem('invalid_message');
       if (room.busy) throw new Problem('start_pending');
@@ -207,7 +214,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
         }
         if ([...room.members.values()].some(p => !p.ready || p.socket?.readyState !== WebSocket.OPEN)) return;
         const runId = randomUUID();
-        await store.beginMatch(runId, room.code, [...room.members.values()].map(m => ({ id: m.player.id, name: m.player.name, skin: m.skin })));
+        await store.beginMatch(runId, room.code, [...room.members.values()].map(m => ({ id: m.player.id, name: m.player.name, skin: m.skin })), room.mode);
         room.matchId = runId;
         await engine.command('start', { code: room.code, playerId: [...room.members.keys()][0], runId, progress });
         await engine.command('pause', { code: room.code, paused: [...room.members.values()].some(p => p.socket?.readyState !== WebSocket.OPEN) });
@@ -225,7 +232,7 @@ export async function startBackend({ config, store, engine = new Engine(), logge
     clearReady(room);
     publishLobby(room);
     void engine.command('pause', { code: room.code, paused: true }).catch(() => closeRoom(room, 'Engine unavailable.'));
-    member.expiry = setTimeout(() => void closeRoom(room, 'Reconnect time expired. The co-op run ended.'), config.reconnectMs);
+    member.expiry = setTimeout(() => void closeRoom(room, room.mode === 'pvp' ? 'Opponent did not reconnect. Remaining player wins.' : 'Reconnect time expired. The co-op run ended.', member.player.id), config.reconnectMs);
     member.expiry.unref();
   }
 

@@ -1,7 +1,7 @@
 # Nfinit backend
 
 Backend standalone pentru jocul Nfinit: **Node.js 24**, **WebSocket**, **MongoDB
-Atlas în cloud**, co-op pentru doi jucători și backupul complet al campionilor.
+Atlas în cloud**, co-op pentru doi jucători, **PvP 1v1** și backupul complet al campionilor.
 Repository-ul conține numai serverul, motorul de simulare și testele sale.
 Nu include aplicația Flutter, imagini, builduri, fișiere `.env` sau credențiale.
 
@@ -35,12 +35,12 @@ curl http://localhost:8081/healthz
 curl http://localhost:8081/readyz
 ```
 
-`healthz` verifică procesul HTTP; `readyz` verifică MongoDB și motorul co-op.
+`healthz` verifică procesul HTTP; `readyz` verifică MongoDB și motorul de joc.
 
-Versiunea **1.1.0** folosește **coopProtocol 2**. După rebuild/redeploy din `main`,
-`/healthz` și `/readyz` trebuie să includă `backendVersion: "1.1.0"`,
+Versiunea **1.2.0** folosește **coopProtocol 2** și **pvpProtocol 1**. După rebuild/redeploy din `main`,
+`/healthz` și `/readyz` trebuie să includă `backendVersion: "1.2.0"`,
 `coopProtocol: 2` și capabilitățile `shared-checkpoint`, `both-players-ready`,
-`shared-champion-progress`. Un simplu `ok: true` fără aceste câmpuri indică
+`shared-champion-progress`, `pvp-1v1`, `hidden-target-immunity`. Un simplu `ok: true` fără aceste câmpuri indică
 backendul vechi. Uploadul aplicației în TestFlight nu actualizează serverul.
 
 În Atlas permite IP-ul hostului și folosește un database user cu read/write.
@@ -112,9 +112,42 @@ sau dependențe Flutter. `engine/sources.json` verifică integritatea lor.
 sursele comune; în acest repository standalone verifică sursele incluse.
 `npm run build:engine` face automat acest pas înaintea compilării.
 
+## PvP 1v1
+
+În aplicație: **ONLINE → PvP 1v1 → Create room / Join room**. Camera are doi
+jucători, cod de cinci caractere și confirmare Start de la amândoi. Modul camerei
+este fix: un client Co-op nu poate intra într-o cameră PvP și invers.
+
+- Duel de 120 secunde în curte, fără monștri sau loot. Campionii folosesc
+  echipament standard de nivel 1; progresul solo nu oferă avantaje în duel.
+- Eliminarea adversarului câștigă duelul. La expirarea timpului câștigă procentul
+  mai mare de HP rămas; procentele egale dau remiză. Revanșa cere ambii Start.
+- Același cover: 0,25 secunde pentru activare, 3 secunde invizibilitate și
+  12 secunde cooldown pe latura folosită. Ieșirea din cover întrerupe ascunderea.
+- Auto-atacul nu selectează adversari invizibili și nu pornește cât timp
+  trăgătorul este invizibil. Proiectilele automate deja lansate, homing-ul,
+  loviturile încărcate, semințele întârziate și efectele automate nu pot răni
+  un adversar ascuns. Nici butonul atacului de bază nu ocolește regula.
+- Numai un skill care primește o țintă manuală validată de server poate lovi
+  ascunsul, dacă zona sa intersectează poziția reală. Exemple: Eclipse, câmpurile
+  Brum/Noctis și sigiliul Noctis (încetinește). O țintă ratată nu produce damage.
+- Snapshoturile adversarului nu includ poziția și efectele care urmăresc un
+  jucător ascuns. Zonele fixe ale skillurilor țintite rămân vizibile.
+- Buffurile și vindecările se aplică numai campionului propriu în PvP.
+- Deconectarea oprește duelul și rezervă locul în perioada de reconectare.
+  Ieșirea explicită sau expirarea perioadei pierde duelul în fața adversarului
+  conectat. O oprire a serverului încheie partida fără victorie acordată.
+- Se salvează idempotent `pvpMatches`, `pvpWins`, `pvpDraws` în profil și meciul
+  cu `mode: "pvp"` în istoricul existent. Fără XP, esență sau checkpoint-uri solo.
+
+Mesajele `join` pentru ambii participanți trebuie să includă `"mode":"pvp"`.
+Dacă `mode` lipsește, serverul păstrează Co-op pentru clienții vechi.
+Clientul nou refuză un server fără `pvpRulesVersion: 1`, în loc să pornească
+accidental o partidă Co-op. Rebuild/redeploy al backendului este necesar.
+
 ## MongoDB Atlas și progres
 
-- `players`: profil guest, hash SHA-256 al tokenului și totaluri co-op.
+- `players`: profil guest, hash SHA-256 al tokenului și totaluri Co-op și PvP separate.
 - `coop_matches`: participanții și rezultatele calculate de server.
 - `player_progress`: backupul complet al campionilor solo, revizie, ultimele
   trei versiuni și ultimele 32 de confirmări idempotente.
@@ -165,7 +198,7 @@ Documentul de progres are schema `{schemaVersion: 1, values: {...}}`, maximum
 
 WebSocket `/ws` primește `join`, `start`, `move`, `voice`, `action` și `leave`.
 Emite `identity`, `state` (20 Hz), `error`, `progressSaved`, `matchSaved` și
-`roomClosed`. Lobby-ul include `ready`, `readyCount`, `starting`, `coopStartWave`
+`roomClosed`. Lobby-ul include `ready`, `readyCount`, `starting`, `coopStartWave` (doar Co-op)
 și starea fiecărui participant din `party`. `{"type":"ready","ready":true}` confirmă
 Start; `false` anulează. `start` este un alias pentru confirmarea personală.
 Confirmările sunt resetate la deconectare, la schimbarea participanților și la

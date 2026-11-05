@@ -93,8 +93,10 @@ test('HTTP profiles require bearer auth and WebSocket origins are checked', asyn
   assert.equal((await fetch(`${base}/api/me`)).status, 401);
   assert.equal((await fetch(`${base}/readyz`)).status, 200);
   const health = await fetch(`${base}/healthz`).then(r => r.json());
-  assert.equal(health.backendVersion, '1.1.0');
+  assert.equal(health.backendVersion, '1.2.0');
   assert.equal(health.coopProtocol, 2);
+  assert.equal(health.pvpProtocol, 1);
+  assert.ok(health.capabilities.includes('hidden-target-immunity'));
   assert.ok(health.capabilities.includes('shared-checkpoint'));
   assert.ok(health.capabilities.includes('both-players-ready'));
   const guest = await fetch(`${base}/api/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Friend' }) }).then(r => r.json());
@@ -152,4 +154,77 @@ test('50 and 75 start together at 51 with individual gear and both advance witho
   for (const [skin, profile] of profiles.entries()) {
     assert.equal(JSON.parse((await store.getProgress(profile.player.id)).document.values.champions_v1).champions[skin].dungeonCheckpoint.wave, 100);
   }
+});
+
+test('PvP rooms require matching mode, two ready players, reconnect and persist a separate forfeit result', async t => {
+  const store = new MemoryStore(), app = await startBackend({ config, store });
+  t.after(() => app.close());
+  const a = await client(app.port), b = await client(app.port), c = await client(app.port);
+  t.after(() => { a.ws.terminate(); b.ws.terminate(); c.ws.terminate(); });
+  a.send({ type: 'join', mode: 'pvp', name: 'Nyx', skin: 0 });
+  await until(() => a.state());
+  const code = a.state().code, identity = a.identity();
+  assert.equal(a.state().mode, 'pvp'); assert.equal(a.state().pvp, true);
+  assert.equal(a.state().coop, false); assert.equal(a.state().pvpRulesVersion, 1);
+  assert.equal(a.state().coopStartWave, undefined);
+  c.send({ type: 'join', mode: 'coop', code, name: 'Wrong mode', skin: 1 });
+  await until(() => c.error('room_mode_mismatch'));
+  b.send({ type: 'join', mode: 'pvp', code, name: 'Brum', skin: 2 });
+  await until(() => b.state()?.humanCount === 2);
+  c.send({ type: 'join', mode: 'pvp', code, name: 'Third', skin: 1 });
+  await until(() => c.error('room_unavailable'));
+  a.send({ type: 'ready', ready: true });
+  await until(() => a.state()?.readyCount === 1);
+  assert.equal(a.state().running, false);
+  a.send({ type: 'ready', ready: false });
+  await until(() => a.state()?.readyCount === 0);
+  a.send({ type: 'start', wave: 999, health: 999999 });
+  b.send({ type: 'start' });
+  await until(() => a.state()?.running && b.state()?.running);
+  assert.equal(a.state().duration, 120); assert.equal(a.state().self.health, 100);
+  assert.equal(b.state().self.health, 100); assert.equal(a.state().party.length, 2);
+  assert.equal(a.state().hunters, 0);
+  const before = await Promise.all([identity.playerId, b.identity().playerId].map(id => store.getProgress(id)));
+  const firstMatch = a.state().matchId;
+  // Exercise the ordinary result/rematch path without waiting for the 120s timer.
+  await app.engine.command('finish', { code, forfeitId: b.state().id, reason: 'Test completed duel' });
+  await until(() => a.state()?.ended && a.state()?.rewardsSaved);
+  a.send({ type: 'ready', ready: true }); b.send({ type: 'ready', ready: true });
+  await until(() => a.state()?.running && a.state()?.matchId !== firstMatch);
+  assert.equal(a.state().pvp, true); assert.equal(a.state().self.health, 100);
+  assert.equal(b.state().self.health, 100);
+  const matchId = a.state().matchId;
+  a.ws.terminate();
+  await until(() => b.state()?.paused && b.state()?.reconnecting);
+  const resumed = await client(app.port); t.after(() => resumed.ws.terminate());
+  resumed.send({ type: 'join', mode: 'pvp', code, token: identity.token, skin: 3 });
+  await until(() => resumed.state()?.running && !resumed.state()?.paused);
+  assert.equal(resumed.state().pvp, true); assert.equal(resumed.state().matchId, matchId);
+  assert.equal(resumed.state().self.skin, 0);
+  b.send({ type: 'leave' });
+  await until(() => store.matches.get(matchId)?.status === 'finished');
+  const result = store.matches.get(matchId).result;
+  assert.equal(result.mode, 'pvp'); assert.equal(result.winnerId, identity.playerId);
+  const winner = (await store.getPlayer(identity.playerId)).stats;
+  assert.equal(winner.pvpWins, 2); assert.equal(winner.pvpMatches, 2);
+  assert.equal((await store.getPlayer(b.identity().playerId)).stats.pvpWins, 0);
+  assert.equal(winner.matches, 0); assert.equal(winner.weaponXp, '0');
+  assert.deepEqual(await Promise.all([identity.playerId, b.identity().playerId].map(id => store.getProgress(id))), before);
+  await store.finishMatch(result);
+  assert.equal((await store.getPlayer(identity.playerId)).stats.pvpMatches, 2);
+  await assert.rejects(store.saveCoopProgress({ id: matchId, states: [] }, () => { throw new Error('must not run'); }));
+});
+
+test('PvP disconnect expiry awards the connected opponent after grace period', async t => {
+  const store = new MemoryStore(), app = await startBackend({ config: { ...config, reconnectMs: 100 }, store });
+  t.after(() => app.close());
+  const a = await client(app.port), b = await client(app.port);
+  t.after(() => { a.ws.terminate(); b.ws.terminate(); });
+  a.send({ type: 'join', mode: 'pvp', name: 'A', skin: 1 }); await until(() => a.state());
+  b.send({ type: 'join', mode: 'pvp', name: 'B', skin: 3, code: a.state().code }); await until(() => b.state());
+  a.send({ type: 'start' }); b.send({ type: 'start' }); await until(() => b.state()?.running);
+  const id = b.state().matchId, survivor = b.state().id;
+  a.ws.terminate();
+  await until(() => store.matches.get(id)?.status === 'finished');
+  assert.equal(store.matches.get(id).result.winnerId, survivor);
 });

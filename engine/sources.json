@@ -24,7 +24,7 @@
     },
     {
       "path": "game/champion_abilities_engine.dart",
-      "sha256": "1563c9cab5eea4e35ee31ce975bbbf19cccb636e279b61e0a18b39f1bdd02e9a"
+      "sha256": "ff02c523f46d8f8a6bf877954283c72852b9d4a6559237b3df274a83f30dea7f"
     },
     {
       "path": "game/champion_abilities.dart",
@@ -68,7 +68,7 @@
     },
     {
       "path": "game/engine.dart",
-      "sha256": "95e96f7407241b1217b94e71418b08215a0769d959afafdb88c00aad687a3882"
+      "sha256": "870e806c06acb0f0537fff8c9d188ff342af8ee28a915fb1b1b1519dcb183cac"
     },
     {
       "path": "game/game_int.dart",
@@ -117,6 +117,10 @@
     {
       "path": "game/nyx_eclipse_motion.dart",
       "sha256": "0740c79ca0c758432bb5d837694abdb9d134ce275328805504ed836a57d45032"
+    },
+    {
+      "path": "game/pvp_engine.dart",
+      "sha256": "32e5cd527475e87a1dbd467ea7acf91c252e2c13878c0d32550fa8ad3de36c4c"
     },
     {
       "path": "game/scoring.dart",

@@ -11,7 +11,9 @@ class MinorSkillEffect {
     this.follow,
     this.radius = 0,
     this.phase = 'cast',
+    this.manuallyTargeted = false,
   });
+  final bool manuallyTargeted;
   final Player owner;
   final int slot;
   final double x, y, time, duration, radius;
@@ -44,6 +46,7 @@ extension ChampionAbilitySimulation on Room {
       .where(
         (q) =>
             _livingChampion(q) &&
+            (!pvp || identical(p, q)) &&
             distance(p, q) <= MinorSkillRules.supportRange &&
             clearPath(p, q),
       )
@@ -59,6 +62,7 @@ extension ChampionAbilitySimulation on Room {
     double? y,
     double radius = 0,
     String phase = 'cast',
+    bool manuallyTargeted = false,
   }) {
     final target = at ?? p;
     minorSkillEffects.add(
@@ -72,6 +76,7 @@ extension ChampionAbilitySimulation on Room {
         follow: follow ? target : null,
         radius: radius,
         phase: phase,
+        manuallyTargeted: manuallyTargeted,
       ),
     );
     if (minorSkillEffects.length > 64) minorSkillEffects.removeAt(0);
@@ -110,7 +115,7 @@ extension ChampionAbilitySimulation on Room {
           players
               .where(
                 (q) =>
-                    q.hunter &&
+                    _canAutoTarget(p, q) &&
                     q.health > 0 &&
                     q.entryLeft <= 0 &&
                     distance(p, q) <= MinorSkillRules.castRange &&
@@ -185,6 +190,7 @@ extension ChampionAbilitySimulation on Room {
         x: x,
         y: y,
         radius: MinorSkillRules.sigilRadius,
+        manuallyTargeted: targeted,
       );
     }
     return true;
@@ -239,7 +245,7 @@ extension ChampionAbilitySimulation on Room {
           players
               .where(
                 (q) =>
-                    q.hunter &&
+                    _canAutoTarget(owner, q) &&
                     q.health > 0 &&
                     !dead.contains(q) &&
                     q != target &&
@@ -288,7 +294,11 @@ extension ChampionAbilitySimulation on Room {
         continue;
       }
       for (final enemy in players.where(
-        (q) => q.hunter && q.health > 0 && q.entryLeft <= 0,
+        (q) =>
+            _hostile(field.owner, q) &&
+            (!pvp || !hidden(q) || field.manuallyTargeted) &&
+            q.health > 0 &&
+            q.entryLeft <= 0,
       )) {
         if (sqrt(pow(enemy.x - field.x, 2) + pow(enemy.y - field.y, 2)) <=
                 field.radius &&
@@ -303,7 +313,9 @@ extension ChampionAbilitySimulation on Room {
     for (final seed
         in livingSeeds.where((s) => elapsed - s.time >= 1).toList()) {
       livingSeeds.remove(seed);
-      if (!_livingChampion(seed.owner)) continue;
+      if (!_livingChampion(seed.owner) || (pvp && hidden(seed.target))) {
+        continue;
+      }
       _minorEffect(seed.owner, 0, .65, at: seed.target, phase: 'burst');
       final shot = CombatProjectile(
         -seed.owner.abilities.serial,
@@ -316,7 +328,7 @@ extension ChampionAbilitySimulation on Room {
       );
       for (final enemy in players.where(
         (q) =>
-            q.hunter &&
+            _canAutoTarget(seed.owner, q) &&
             q.health > 0 &&
             !dead.contains(q) &&
             q.entryLeft <= 0 &&

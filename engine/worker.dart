@@ -20,7 +20,8 @@ class Match {
 
   void tick() {
     room.tick();
-    if (runId != null &&
+    if (room.cooperative &&
+        runId != null &&
         (room.completedWaves > savedCompleted ||
             (room.ended && !finalProgressSent))) {
       savedCompleted = room.completedWaves;
@@ -58,6 +59,8 @@ class Match {
         'code': room.code,
         'result': {
           'id': runId,
+          'mode': room.pvp ? 'pvp' : 'coop',
+          if (room.pvp) 'winnerId': room.winner,
           'roomCode': room.code,
           'outcome': room.winner ?? 'abandoned',
           'wave': room.wave,
@@ -127,7 +130,13 @@ Future<void> main() async {
       var match = matches[code];
       if (op == 'join') {
         match ??= matches[code] = Match(
-          Room(code, false, mode: MatchMode.survival, cooperative: true),
+          Room(
+            code,
+            false,
+            mode: command['mode'] == 'pvp' ? MatchMode.pvp : MatchMode.survival,
+            cooperative: command['mode'] != 'pvp',
+            duration: command['mode'] == 'pvp' ? 120 : 90,
+          ),
         );
         if (match.room.running ||
             match.room.players.length >= 2 ||
@@ -168,6 +177,12 @@ Future<void> main() async {
             match.progressSequence = 0;
             match.savedCompleted = 0;
             match.finalProgressSent = false;
+            if (room.pvp) {
+              room.paused = false;
+              room.start();
+              match.tick();
+              break;
+            }
             final saved = command['progress'] as Map? ?? {};
             final champions = {
               for (final p in room.players.where((p) => !p.isBot))
@@ -246,7 +261,14 @@ Future<void> main() async {
             match.tick();
           case 'finish':
             if (room.running) {
-              room.winner = 'abandoned';
+              final forfeitId = command['forfeitId'];
+              room.winner = room.pvp && forfeitId is String
+                  ? room.players
+                            .where((p) => p.id != forfeitId)
+                            .firstOrNull
+                            ?.id ??
+                        'abandoned'
+                  : 'abandoned';
               room.endRound(
                 command['reason'] as String? ?? 'Co-op session ended.',
               );
